@@ -1,12 +1,12 @@
-# QDT - Fast 2D Delaunay Triangulation
+# QDT - Quick 2D Delaunay Triangulation
 
-QDT is a small C library for fast Delaunay triangulation of 2D point sets.
+QDT is a small C library for quick Delaunay triangulation of 2D point sets.
 It exposes a simple C API and supports both single-threaded and parallel
 execution.
 
 ## Features
 
-- Fast 2D Delaunay triangulation.
+- Quick 2D Delaunay triangulation.
 - Simple C API with an opaque handle.
 - Single-threaded and parallel execution modes.
 - Suitable for point clouds, mesh generation, interpolation, and related
