@@ -24,6 +24,10 @@
 
 namespace parallel
 {
+    constexpr unsigned MAX_WORKERS = 64;
+
+    thread_local int tls_slot = 0;
+
     class ThreadPool
     {
     public:
@@ -31,8 +35,13 @@ namespace parallel
         {
             if (n == 0) n = 1;
             for (size_t i = 0; i < n; ++i)
-                workers_.emplace_back([this] { worker_loop(); });
+                workers_.emplace_back([this, i] {
+                    tls_slot = static_cast<int>(i) + 1;
+                    worker_loop();
+                });
         }
+
+        size_t size() const { return workers_.size(); }
 
         ~ThreadPool()
         {
@@ -108,16 +117,6 @@ namespace parallel
         std::condition_variable cv_;
         bool stop_;
     };
-
-    std::atomic<int> g_next_thread_id{ 0 };
-    thread_local int tls_thread_id = -1;
-
-    inline int get_thread_id()
-    {
-        if (tls_thread_id < 0)
-            tls_thread_id = g_next_thread_id.fetch_add(1, std::memory_order_relaxed);
-        return tls_thread_id;
-    }
 
     using Point = qdt_vec2d;
 
@@ -437,7 +436,8 @@ namespace parallel
         {
         public:
             static constexpr int CHUNK_SIZE = 65536;
-            static constexpr int MAX_POOLS = 512;
+            // slot 0 = calling thread, slots 1..MAX_WORKERS = pool workers
+            static constexpr int MAX_POOLS = static_cast<int>(MAX_WORKERS) + 1;
             static constexpr int MAX_PARALLEL_DEPTH = 3;
             static constexpr int PARALLEL_MIN_SIZE = 524288;
             static constexpr int MERGE_PARALLEL_DEPTH = 1;
@@ -498,13 +498,13 @@ namespace parallel
 
             Pool& my_pool()
             {
-                const int tid = get_thread_id();
-                if (tid < 0 || tid >= MAX_POOLS)
+                const int slot = tls_slot;
+                if (slot < 0 || slot >= MAX_POOLS)
                 {
-                    std::fprintf(stderr, "Builder: thread id %d >= MAX_POOLS\n", tid);
+                    std::fprintf(stderr, "Builder: thread slot %d >= MAX_POOLS\n", slot);
                     std::abort();
                 }
-                return pools_[tid];
+                return pools_[slot];
             }
 
             int onext(int e) const { return qe[e >> 2].next[e & 3]; }
@@ -846,7 +846,7 @@ namespace parallel
         {
             unsigned nthreads = std::thread::hardware_concurrency();
             if (nthreads == 0) nthreads = 1;
-            if (nthreads > 64) nthreads = 64;
+            if (nthreads > MAX_WORKERS) nthreads = MAX_WORKERS;
 
             if (nthreads > 1 && V.size() >= 200000)
             {
