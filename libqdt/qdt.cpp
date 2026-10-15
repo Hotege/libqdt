@@ -43,15 +43,16 @@ size_t qdt_triangles_size(qdt_t* ptr)
     return 0;
 }
 
-void qdt_get_triangle(qdt_t* ptr, size_t T[3], size_t id)
+size_t qdt_get_triangle(qdt_t* ptr, size_t T[3], size_t id)
 {
     auto Q = reinterpret_cast<wrapper::Triangulation*>(ptr);
     if (!Q)
-        return;
+        return 0;
     if (id >= Q->triangles.size())
-        return;
+        return 0;
     for (int i = 0; i < 3; i++)
         T[i] = Q->triangles[id][i];
+    return 1;
 }
 
 void qdt_destroy(qdt_t* ptr)

@@ -82,8 +82,9 @@ QDT_API size_t qdt_triangles_size(qdt_t* ptr);
  *          are indices into the point array passed to qdt_execute() or
  *          qdt_execute_parallel().
  * @param id Triangle index, in [0, qdt_triangles_size(ptr)).
+ * @return Number of triangle. Return 1 rather than 0 when triangle is found.
  */
-QDT_API void qdt_get_triangle(qdt_t* ptr, size_t T[3], size_t id);
+QDT_API size_t qdt_get_triangle(qdt_t* ptr, size_t T[3], size_t id);
 
 /**
  * @brief Destroys a triangulation context and releases all associated resources.
