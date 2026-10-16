@@ -65,8 +65,30 @@ QDT_API void qdt_execute(qdt_t* ptr, qdt_vec2d* pts, size_t n);
  */
 QDT_API void qdt_execute_parallel(qdt_t* ptr, qdt_vec2d* pts, size_t n);
 
+/**
+ * @brief Inserts a single 2D point into the triangulation context.
+ *
+ * The point is added to the current triangulation, and the triangulation
+ * is updated incrementally. The returned value identifies the inserted
+ * point within the context.
+ *
+ * @param ptr Triangulation context created by qdt_create().
+ * @param pt 2D point to insert.
+ * @return The amount of all points.
+ */
 QDT_API size_t qdt_insert_point(qdt_t* ptr, const qdt_vec2d& pt);
 
+/**
+ * @brief Inserts a single 2D point using a parallel implementation.
+ *
+ * This function has the same effect as qdt_insert_point(), but the
+ * computation may use multiple threads for better performance on large
+ * point sets or suitable workloads.
+ *
+ * @param ptr Triangulation context created by qdt_create().
+ * @param pt 2D point to insert.
+ * @return The amount of all points.
+ */
 QDT_API size_t qdt_insert_point_parallel(qdt_t* ptr, const qdt_vec2d& pt);
 
 /**
