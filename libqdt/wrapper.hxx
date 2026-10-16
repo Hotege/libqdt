@@ -15,7 +15,11 @@ namespace wrapper
         std::vector<qdt_vec2d> input_points;
 
         void insert(const qdt_vec2d& p);
+        void insert_parallel(const qdt_vec2d& p);
+
         void ensure_mesh_();
+        void ensure_mesh_parallel_();
+
     private:
         struct MeshVertex
         {
@@ -32,13 +36,14 @@ namespace wrapper
             int triangle_idx;
         };
 
-        bool                     mesh_built_ = false;
-        std::vector<MeshVertex>  mesh_vertices_;
+        bool                      mesh_built_ = false;
+        std::vector<MeshVertex>   mesh_vertices_;
         std::vector<MeshHalfEdge> mesh_halfedges_;
-        std::vector<int>         free_halfedges_;
-        int                      last_face_he_ = 0;
-        std::vector<int>         triangle_to_he_;
+        std::vector<int>          free_halfedges_;
+        int                       last_face_he_ = 0;
+        std::vector<int>          triangle_to_he_;
 
+        void insert_after_mesh_(const qdt_vec2d& p);
         int  alloc_halfedge_();
         void free_halfedge_(int h);
         int  locate_(const qdt_vec2d& p, int& hull_he);

@@ -67,6 +67,8 @@ QDT_API void qdt_execute_parallel(qdt_t* ptr, qdt_vec2d* pts, size_t n);
 
 QDT_API size_t qdt_insert_point(qdt_t* ptr, const qdt_vec2d& pt);
 
+QDT_API size_t qdt_insert_point_parallel(qdt_t* ptr, const qdt_vec2d& pt);
+
 /**
  * @brief Returns the number of triangles produced by the last execution.
  *

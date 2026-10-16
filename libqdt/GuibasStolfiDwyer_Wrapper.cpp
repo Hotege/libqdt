@@ -1,12 +1,15 @@
 #include <algorithm>
-#include <cstdio>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <memory>
 #include <numeric>
 #include <queue>
 #include <random>
 #include <set>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -821,6 +824,182 @@ namespace wrapper
         mesh_built_ = true;
     }
 
+    void Triangulation::ensure_mesh_parallel_()
+    {
+        if (mesh_built_) return;
+
+        unsigned nthreads = std::thread::hardware_concurrency();
+        if (nthreads == 0) nthreads = 1;
+        if (nthreads > 64) nthreads = 64;
+
+        const size_t nTri = triangles.size();
+
+        if (nthreads == 1 || nTri < 50000)
+        {
+            ensure_mesh_();
+            return;
+        }
+
+        mesh_vertices_.clear();
+        mesh_halfedges_.clear();
+        free_halfedges_.clear();
+        last_face_he_ = 0;
+        triangle_to_he_.clear();
+
+        const size_t nHE = 3 * nTri;
+
+        std::vector<int> orig_to_local(input_points.size(), -1);
+        mesh_vertices_.reserve(nTri * 3);
+
+        for (size_t t = 0; t < nTri; ++t)
+        {
+            const auto& tri = triangles[t];
+            for (int i = 0; i < 3; ++i)
+            {
+                const size_t orig = tri[i];
+                int& slot = orig_to_local[orig];
+                if (slot < 0)
+                {
+                    slot = static_cast<int>(mesh_vertices_.size());
+                    MeshVertex v;
+                    v.p = input_points[orig];
+                    v.orig_id = orig;
+                    v.halfedge = -1;
+                    mesh_vertices_.push_back(v);
+                }
+            }
+        }
+
+        mesh_halfedges_.resize(nHE);
+        triangle_to_he_.resize(nTri);
+
+        const int nV = static_cast<int>(mesh_vertices_.size());
+
+        std::unique_ptr<std::atomic<int>[]> v_he(new std::atomic<int>[nV]);
+        for (int i = 0; i < nV; ++i)
+            v_he[i].store(-1, std::memory_order_relaxed);
+
+        {
+            std::vector<std::thread> workers;
+            workers.reserve(nthreads);
+
+            auto fill = [&](size_t t0, size_t t1) {
+                MeshHalfEdge* hp = mesh_halfedges_.data();
+                for (size_t t = t0; t < t1; ++t)
+                {
+                    const auto& tri = triangles[t];
+                    const int v0 = orig_to_local[tri[0]];
+                    const int v1 = orig_to_local[tri[1]];
+                    const int v2 = orig_to_local[tri[2]];
+                    const int base = static_cast<int>(3 * t);
+
+                    hp[base + 0].origin = v0;
+                    hp[base + 0].twin = -1;
+                    hp[base + 0].next = base + 1;
+                    hp[base + 0].triangle_idx = static_cast<int>(t);
+
+                    hp[base + 1].origin = v1;
+                    hp[base + 1].twin = -1;
+                    hp[base + 1].next = base + 2;
+                    hp[base + 1].triangle_idx = static_cast<int>(t);
+
+                    hp[base + 2].origin = v2;
+                    hp[base + 2].twin = -1;
+                    hp[base + 2].next = base + 0;
+                    hp[base + 2].triangle_idx = static_cast<int>(t);
+
+                    triangle_to_he_[t] = base;
+
+                    int expected = -1;
+                    v_he[v0].compare_exchange_strong(
+                        expected, base + 0, std::memory_order_relaxed);
+                    expected = -1;
+                    v_he[v1].compare_exchange_strong(
+                        expected, base + 1, std::memory_order_relaxed);
+                    expected = -1;
+                    v_he[v2].compare_exchange_strong(
+                        expected, base + 2, std::memory_order_relaxed);
+                }
+                };
+
+            const size_t chunk = (nTri + nthreads - 1) / nthreads;
+            for (unsigned i = 0; i < nthreads; ++i)
+            {
+                const size_t t0 = i * chunk;
+                const size_t t1 = std::min(nTri, t0 + chunk);
+                if (t0 >= t1) break;
+                workers.emplace_back(fill, t0, t1);
+            }
+            for (auto& th : workers) th.join();
+        }
+
+        for (int i = 0; i < nV; ++i)
+            mesh_vertices_[i].halfedge =
+            v_he[i].load(std::memory_order_relaxed);
+
+        std::vector<int> offset(nV + 1, 0);
+        {
+            MeshHalfEdge* hp = mesh_halfedges_.data();
+            for (size_t i = 0; i < nHE; ++i)
+                ++offset[hp[i].origin + 1];
+            for (int v = 0; v < nV; ++v)
+                offset[v + 1] += offset[v];
+        }
+
+        std::vector<int> adj(nHE);
+        {
+            MeshHalfEdge* hp = mesh_halfedges_.data();
+            std::vector<int> cursor(offset.begin(), offset.begin() + nV);
+            for (size_t i = 0; i < nHE; ++i)
+            {
+                const int u = hp[i].origin;
+                adj[cursor[u]++] = static_cast<int>(i);
+            }
+        }
+
+        {
+            std::vector<std::thread> workers;
+            workers.reserve(nthreads);
+
+            auto find_twins = [&](size_t i0, size_t i1) {
+                MeshHalfEdge* hp = mesh_halfedges_.data();
+                for (size_t i = i0; i < i1; ++i)
+                {
+                    if (hp[i].twin >= 0) continue;
+
+                    const int u = hp[i].origin;
+                    const int v = hp[hp[i].next].origin;
+
+                    const int start = offset[v];
+                    const int end = offset[v + 1];
+                    for (int k = start; k < end; ++k)
+                    {
+                        const int h2 = adj[k];
+                        if (hp[h2].origin != v) continue;
+                        const int u2 = hp[hp[h2].next].origin;
+                        if (u2 == u)
+                        {
+                            hp[i].twin = h2;
+                            break;
+                        }
+                    }
+                }
+                };
+
+            const size_t chunk = (nHE + nthreads - 1) / nthreads;
+            for (unsigned i = 0; i < nthreads; ++i)
+            {
+                const size_t i0 = i * chunk;
+                const size_t i1 = std::min(nHE, i0 + chunk);
+                if (i0 >= i1) break;
+                workers.emplace_back(find_twins, i0, i1);
+            }
+            for (auto& th : workers) th.join();
+        }
+
+        mesh_built_ = true;
+    }
+
     int Triangulation::alloc_halfedge_()
     {
         if (!free_halfedges_.empty())
@@ -916,7 +1095,17 @@ namespace wrapper
     void Triangulation::insert(const qdt_vec2d& p)
     {
         ensure_mesh_();
+        insert_after_mesh_(p);
+    }
 
+    void Triangulation::insert_parallel(const qdt_vec2d& p)
+    {
+        ensure_mesh_parallel_();
+        insert_after_mesh_(p);
+    }
+
+    void Triangulation::insert_after_mesh_(const qdt_vec2d& p)
+    {
         for (const auto& v : mesh_vertices_)
         {
             if (v.p.x == p.x && v.p.y == p.y)
