@@ -5,13 +5,13 @@
 namespace wrapper
 {
     using Point = qdt_vec2d;
-    Triangulation delaunay_triangulate(Point* pts, size_t sz, bool dwyer);
+    Triangulation delaunay_triangulate(Point* pts, size_t sz);
 }
 
 namespace parallel
 {
     using Point = qdt_vec2d;
-    wrapper::Triangulation delaunay_triangulate(Point* pts, size_t sz, bool dwyer);
+    wrapper::Triangulation delaunay_triangulate(Point* pts, size_t sz);
 }
 
 qdt_t* qdt_create()
@@ -24,7 +24,7 @@ void qdt_execute(qdt_t* ptr, qdt_vec2d* pts, size_t n)
     auto Q = reinterpret_cast<wrapper::Triangulation*>(ptr);
     if (!Q)
         return;
-    *Q = wrapper::delaunay_triangulate(pts, n, true);
+    *Q = wrapper::delaunay_triangulate(pts, n);
 }
 
 void qdt_execute_parallel(qdt_t* ptr, qdt_vec2d* pts, size_t n)
@@ -32,7 +32,7 @@ void qdt_execute_parallel(qdt_t* ptr, qdt_vec2d* pts, size_t n)
     auto Q = reinterpret_cast<wrapper::Triangulation*>(ptr);
     if (!Q)
         return;
-    *Q = parallel::delaunay_triangulate(pts, n, true);
+    *Q = parallel::delaunay_triangulate(pts, n);
 }
 
 size_t qdt_insert_point(qdt_t* ptr, const qdt_vec2d& pt)

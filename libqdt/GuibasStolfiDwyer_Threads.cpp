@@ -442,8 +442,8 @@ namespace parallel
             static constexpr int PARALLEL_MIN_SIZE = 524288;
             static constexpr int MERGE_PARALLEL_DEPTH = 1;
 
-            Builder(std::vector<Vtx>& v, bool dwyer, ThreadPool* pool)
-                : V(v), dwyer_(dwyer), pool_(pool)
+            Builder(std::vector<Vtx>& v, ThreadPool* pool)
+                : V(v), pool_(pool)
             {
                 qe.resize(5 * static_cast<int>(V.size()) + 64 * 1024);
                 for (auto& p : pools_)
@@ -493,7 +493,6 @@ namespace parallel
             std::vector<QE> qe;
             std::array<Pool, MAX_POOLS> pools_{};
             std::atomic<int> g_next{ 0 };
-            bool dwyer_;
             ThreadPool* pool_ = nullptr;
 
             Pool& my_pool()
@@ -748,7 +747,7 @@ namespace parallel
                 if (n <= 3) return leaf(lo, hi, outAxis);
 
                 const int mid = lo + n / 2;
-                if (dwyer_ && !presorted)
+                if (!presorted)
                 {
                     if (axis == 0)
                     {
@@ -765,7 +764,7 @@ namespace parallel
                             });
                     }
                 }
-                const int childAxis = dwyer_ ? 1 - axis : axis;
+                const int childAxis = 1 - axis;
 
                 std::pair<int, int> L, R;
                 const bool can_parallel =
@@ -802,7 +801,7 @@ namespace parallel
         };
     }
 
-    wrapper::Triangulation delaunay_triangulate(Point* pts, size_t sz, bool dwyer)
+    wrapper::Triangulation delaunay_triangulate(Point* pts, size_t sz)
     {
         const int n = static_cast<int>(sz);
 
@@ -851,13 +850,13 @@ namespace parallel
             if (nthreads > 1 && V.size() >= 200000)
             {
                 ThreadPool pool(nthreads);
-                detail::Builder b(V, dwyer, &pool);
+                detail::Builder b(V, &pool);
                 b.run();
                 b.extract(res.triangles);
             }
             else
             {
-                detail::Builder b(V, dwyer, nullptr);
+                detail::Builder b(V, nullptr);
                 b.run();
                 b.extract(res.triangles);
             }

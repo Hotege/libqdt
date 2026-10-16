@@ -19,7 +19,7 @@
 namespace wrapper
 {
     using Point = qdt_vec2d;
-    Triangulation delaunay_triangulate(Point* pts, size_t sz, bool dwyer);
+    Triangulation delaunay_triangulate(Point* pts, size_t sz);
     namespace robust
     {
         namespace exact
@@ -386,7 +386,7 @@ namespace wrapper
         class Builder
         {
         public:
-            Builder(std::vector<Vtx>& v, bool dwyer) : V(v), dwyer_(dwyer)
+            Builder(std::vector<Vtx>& v) : V(v)
             {
                 qe.reserve(3 * V.size() + 16);
             }
@@ -422,7 +422,6 @@ namespace wrapper
             std::vector<Vtx>& V;
             std::vector<QE> qe;
             int freeHead = -1;
-            bool dwyer_;
 
             int onext(int e) const
             {
@@ -647,7 +646,7 @@ namespace wrapper
                     return leaf(lo, hi, outAxis);
 
                 const int mid = lo + n / 2;
-                if (dwyer_ && !presorted)
+                if (!presorted)
                 {
                     if (axis == 0)
                     {
@@ -664,7 +663,7 @@ namespace wrapper
                             });
                     }
                 }
-                const int childAxis = dwyer_ ? 1 - axis : axis;
+                const int childAxis = 1 - axis;
                 const auto L = build(lo, mid, childAxis, axis, false);
                 const auto R = build(mid, hi, childAxis, axis, false);
                 auto res = merge(L.first, L.second, R.first, R.second);
@@ -1088,7 +1087,7 @@ namespace wrapper
     {
         input_points.push_back(p);
         Triangulation fresh = delaunay_triangulate(
-            input_points.data(), input_points.size(), true);
+            input_points.data(), input_points.size());
         *this = std::move(fresh);
     }
 
@@ -1327,7 +1326,7 @@ namespace wrapper
         if (new_tris.empty())
         {
             Triangulation fresh = delaunay_triangulate(
-                input_points.data(), input_points.size(), true);
+                input_points.data(), input_points.size());
             *this = std::move(fresh);
             return;
         }
@@ -1360,7 +1359,7 @@ namespace wrapper
         last_face_he_ = new_tris[0].h0;
     }
 
-    Triangulation delaunay_triangulate(Point* pts, size_t sz, bool dwyer)
+    Triangulation delaunay_triangulate(Point* pts, size_t sz)
     {
         const int n = static_cast<int>(sz);
 
@@ -1391,7 +1390,7 @@ namespace wrapper
 
         if (V.size() >= 3)
         {
-            detail::Builder b(V, dwyer);
+            detail::Builder b(V);
             b.run();
             b.extract(res.triangles);
         }
