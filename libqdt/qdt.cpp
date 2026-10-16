@@ -35,7 +35,7 @@ void qdt_execute_parallel(qdt_t* ptr, qdt_vec2d* pts, size_t n)
     *Q = parallel::delaunay_triangulate(pts, n);
 }
 
-size_t qdt_insert_point(qdt_t* ptr, const qdt_vec2d& pt)
+size_t qdt_insert_point(qdt_t* ptr, qdt_vec2d pt)
 {
     auto Q = reinterpret_cast<wrapper::Triangulation*>(ptr);
     if (!Q)
@@ -44,7 +44,7 @@ size_t qdt_insert_point(qdt_t* ptr, const qdt_vec2d& pt)
     return Q->input_points.size();
 }
 
-size_t qdt_insert_point_parallel(qdt_t* ptr, const qdt_vec2d& pt)
+size_t qdt_insert_point_parallel(qdt_t* ptr, qdt_vec2d pt)
 {
     auto Q = reinterpret_cast<wrapper::Triangulation*>(ptr);
     if (!Q)
