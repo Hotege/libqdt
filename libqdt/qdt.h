@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Hotege. All rights reserved.
+ *
+ * This file is part of the QDT library.
+ */
 #if !defined(_LIB_QDT_H_)
 #define _LIB_QDT_H_
 
