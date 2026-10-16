@@ -1235,18 +1235,6 @@ namespace wrapper
             }
         }
 
-        std::vector<int> cavity_tri_indices;
-        for (size_t i = 0; i < visited_tri.size(); ++i)
-        {
-            if (visited_tri[i])
-                cavity_tri_indices.push_back(static_cast<int>(i));
-        }
-        std::sort(cavity_tri_indices.rbegin(), cavity_tri_indices.rend());
-        for (int idx : cavity_tri_indices)
-        {
-            remove_triangle_by_index_(idx);
-        }
-
         struct BoundaryInfo { int a, b, external_twin; };
         std::vector<BoundaryInfo> boundary_info;
 
@@ -1281,6 +1269,18 @@ namespace wrapper
             const int a = mesh_halfedges_[e].origin;
             const int b = mesh_halfedges_[e1].origin;
             boundary_info.push_back({ b, a, e });
+        }
+
+        std::vector<int> cavity_tri_indices;
+        for (size_t i = 0; i < visited_tri.size(); ++i)
+        {
+            if (visited_tri[i])
+                cavity_tri_indices.push_back(static_cast<int>(i));
+        }
+        std::sort(cavity_tri_indices.rbegin(), cavity_tri_indices.rend());
+        for (int idx : cavity_tri_indices)
+        {
+            remove_triangle_by_index_(idx);
         }
 
         for (int h : cavity_hes)
