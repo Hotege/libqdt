@@ -1,4 +1,3 @@
-
 #if !defined(_LIB_QDT_WRAPPER_HXX_)
 #define _LIB_QDT_WRAPPER_HXX_
 
@@ -16,6 +15,7 @@ namespace wrapper
         std::vector<qdt_vec2d> input_points;
 
         void insert(const qdt_vec2d& p);
+        void ensure_mesh_();
     private:
         struct MeshVertex
         {
@@ -29,6 +29,7 @@ namespace wrapper
             int origin;
             int twin;
             int next;
+            int triangle_idx;
         };
 
         bool                     mesh_built_ = false;
@@ -36,13 +37,14 @@ namespace wrapper
         std::vector<MeshHalfEdge> mesh_halfedges_;
         std::vector<int>         free_halfedges_;
         int                      last_face_he_ = 0;
+        std::vector<int>         triangle_to_he_;
 
-        void ensure_mesh_();
         int  alloc_halfedge_();
         void free_halfedge_(int h);
         int  locate_(const qdt_vec2d& p, int& hull_he);
         void insert_by_rebuild_(const qdt_vec2d& p);
-        void rebuild_output_();
+        size_t add_triangle_to_output_(size_t id0, size_t id1, size_t id2, int h0);
+        void remove_triangle_by_index_(size_t idx);
     };
 }
 

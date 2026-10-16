@@ -8,7 +8,6 @@
 #include <random>
 #include <set>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "qdt.h"
@@ -479,7 +478,8 @@ namespace wrapper
             {
                 const int alpha = rot(onext(a)), beta = rot(onext(b));
                 std::swap(qe[a >> 2].next[a & 3], qe[b >> 2].next[b & 3]);
-                std::swap(qe[alpha >> 2].next[alpha & 3], qe[beta >> 2].next[beta & 3]);
+                std::swap(qe[alpha >> 2].next[alpha & 3],
+                    qe[beta >> 2].next[beta & 3]);
             }
 
             int connect(int a, int b)
@@ -678,22 +678,88 @@ namespace wrapper
         };
 
     }
+
+    size_t Triangulation::add_triangle_to_output_(size_t id0, size_t id1, size_t id2, int h0)
+    {
+        size_t new_idx = triangles.size();
+        triangles.push_back({ id0, id1, id2 });
+        triangle_to_he_.push_back(h0);
+        return new_idx;
+    }
+
+    void Triangulation::remove_triangle_by_index_(size_t idx)
+    {
+        size_t last_idx = triangles.size() - 1;
+        if (idx != last_idx)
+        {
+            triangles[idx] = triangles[last_idx];
+            int moved_he = triangle_to_he_[last_idx];
+            triangle_to_he_[idx] = moved_he;
+
+            int cur = moved_he;
+            do {
+                mesh_halfedges_[cur].triangle_idx = static_cast<int>(idx);
+                cur = mesh_halfedges_[cur].next;
+            } while (cur != moved_he);
+        }
+        triangles.pop_back();
+        triangle_to_he_.pop_back();
+    }
+
+    struct EdgeRecord {
+        uint32_t u, v;
+        int halfedge_idx;
+
+        uint64_t sort_key() const {
+            uint32_t lo = (u < v) ? u : v;
+            uint32_t hi = (u < v) ? v : u;
+            return (static_cast<uint64_t>(lo) << 32) | hi;
+        }
+    };
+
+    // 64 位基数排序（Radix Sort），4 轮 16 位，O(N) 线性时间，无分支、无哈希冲突
+    inline void radix_sort_edges(std::vector<EdgeRecord>& edges) {
+        size_t n = edges.size();
+        if (n <= 1) return;
+        std::vector<EdgeRecord> temp(n);
+        for (int shift = 0; shift < 64; shift += 16) {
+            size_t count[65536] = { 0 };
+            for (size_t i = 0; i < n; ++i) {
+                uint16_t bucket = (edges[i].sort_key() >> shift) & 0xFFFF;
+                count[bucket]++;
+            }
+            size_t total = 0;
+            for (size_t i = 0; i < 65536; ++i) {
+                size_t cnt = count[i];
+                count[i] = total;
+                total += cnt;
+            }
+            for (size_t i = 0; i < n; ++i) {
+                uint16_t bucket = (edges[i].sort_key() >> shift) & 0xFFFF;
+                temp[count[bucket]++] = edges[i];
+            }
+            edges.swap(temp);
+        }
+    }
+
     void Triangulation::ensure_mesh_()
     {
         if (mesh_built_) return;
 
-        std::unordered_map<size_t, int> orig_to_local;
         mesh_vertices_.clear();
         mesh_halfedges_.clear();
         free_halfedges_.clear();
         last_face_he_ = 0;
+        triangle_to_he_.clear();
+
+        std::vector<int> orig_to_local(input_points.size(), -1);
 
         for (const auto& t : triangles)
         {
             for (int i = 0; i < 3; ++i)
             {
                 const size_t orig = t[i];
-                if (orig_to_local.find(orig) == orig_to_local.end())
+                if (orig_to_local[orig] < 0)
                 {
                     const int local = static_cast<int>(mesh_vertices_.size());
                     orig_to_local[orig] = local;
@@ -707,10 +773,20 @@ namespace wrapper
             }
         }
 
-        std::unordered_map<uint64_t, int> edge_map;
+        mesh_halfedges_.reserve(3 * triangles.size());
+        triangle_to_he_.reserve(triangles.size());
 
-        for (const auto& t : triangles)
+        std::vector<EdgeRecord> edge_records;
+        edge_records.reserve(3 * triangles.size());
+
+        int h_idx = 0;
+        std::vector<std::array<size_t, 3>> old_triangles = std::move(triangles);
+        triangles.clear();
+        triangles.reserve(old_triangles.size());
+
+        for (size_t tri_idx = 0; tri_idx < old_triangles.size(); ++tri_idx)
         {
+            const auto& t = old_triangles[tri_idx];
             int v[3];
             for (int i = 0; i < 3; ++i)
                 v[i] = orig_to_local[t[i]];
@@ -718,8 +794,8 @@ namespace wrapper
             int h[3];
             for (int i = 0; i < 3; ++i)
             {
-                h[i] = static_cast<int>(mesh_halfedges_.size());
-                mesh_halfedges_.push_back({ v[i], -1, -1 });
+                h[i] = h_idx++;
+                mesh_halfedges_.push_back({ v[i], -1, -1, static_cast<int>(tri_idx) });
             }
 
             for (int i = 0; i < 3; ++i)
@@ -727,34 +803,31 @@ namespace wrapper
 
             for (int i = 0; i < 3; ++i)
             {
-                const int a = v[i];
-                const int b = v[(i + 1) % 3];
-
-                const uint64_t key_fwd =
-                    (static_cast<uint64_t>(static_cast<uint32_t>(a)) << 32) |
-                    static_cast<uint32_t>(b);
-                const uint64_t key_rev =
-                    (static_cast<uint64_t>(static_cast<uint32_t>(b)) << 32) |
-                    static_cast<uint32_t>(a);
-
-                auto it = edge_map.find(key_rev);
-                if (it != edge_map.end())
-                {
-                    const int other = it->second;
-                    mesh_halfedges_[h[i]].twin = other;
-                    mesh_halfedges_[other].twin = h[i];
-                    edge_map.erase(it);
-                }
-                else
-                {
-                    edge_map[key_fwd] = h[i];
-                }
-            }
-
-            for (int i = 0; i < 3; ++i)
-            {
                 if (mesh_vertices_[v[i]].halfedge < 0)
                     mesh_vertices_[v[i]].halfedge = h[i];
+            }
+
+            edge_records.push_back({ static_cast<uint32_t>(v[0]), static_cast<uint32_t>(v[1]), h[0] });
+            edge_records.push_back({ static_cast<uint32_t>(v[1]), static_cast<uint32_t>(v[2]), h[1] });
+            edge_records.push_back({ static_cast<uint32_t>(v[2]), static_cast<uint32_t>(v[0]), h[2] });
+
+            triangles.push_back(t);
+            triangle_to_he_.push_back(h[0]);
+        }
+
+        // 1. 使用超高速基数排序代替 std::sort 与哈希表
+        radix_sort_edges(edge_records);
+
+        // 2. 线性扫描配对 Twin 边
+        for (size_t i = 0; i + 1 < edge_records.size(); ++i)
+        {
+            const auto& e1 = edge_records[i];
+            const auto& e2 = edge_records[i + 1];
+            if (e1.sort_key() == e2.sort_key() && e1.u != e2.u)
+            {
+                mesh_halfedges_[e1.halfedge_idx].twin = e2.halfedge_idx;
+                mesh_halfedges_[e2.halfedge_idx].twin = e1.halfedge_idx;
+                ++i;
             }
         }
 
@@ -779,13 +852,10 @@ namespace wrapper
         mesh_halfedges_[h].origin = -1;
         mesh_halfedges_[h].twin = -1;
         mesh_halfedges_[h].next = -1;
+        mesh_halfedges_[h].triangle_idx = -1;
         free_halfedges_.push_back(h);
     }
 
-    // 定位包含 p 的三角形，返回该三角形的一条半边。
-    // 若 p 位于凸包之外，返回 -1，并通过 hull_he 给出 walk 越过的那条凸包半边
-    // （p 严格位于该边外侧，即该边对 p 可见）。
-    // 返回 -1 且 hull_he == -1 表示定位失败（理论上不应发生）。
     int Triangulation::locate_(const qdt_vec2d& p, int& hull_he)
     {
         hull_he = -1;
@@ -848,42 +918,6 @@ namespace wrapper
         return -1;
     }
 
-    void Triangulation::rebuild_output_()
-    {
-        triangles.clear();
-        std::unordered_set<int> visited;
-
-        for (int h = 0; h < static_cast<int>(mesh_halfedges_.size()); ++h)
-        {
-            if (mesh_halfedges_[h].origin < 0)
-                continue;
-
-            const int h1 = mesh_halfedges_[h].next;
-            const int h2 = mesh_halfedges_[h1].next;
-            if (h1 < 0 || h2 < 0)
-                continue;
-            if (mesh_halfedges_[h2].next != h)
-                continue;
-
-            const int canon = std::min({ h, h1, h2 });
-            if (visited.count(canon))
-                continue;
-            visited.insert(canon);
-
-            const int v0 = mesh_halfedges_[h].origin;
-            const int v1 = mesh_halfedges_[h1].origin;
-            const int v2 = mesh_halfedges_[h2].origin;
-
-            triangles.push_back({
-                mesh_vertices_[v0].orig_id,
-                mesh_vertices_[v1].orig_id,
-                mesh_vertices_[v2].orig_id
-                });
-        }
-    }
-
-    // 兜底路径：把点追加到 input_points 后整体重建。
-    // 用于网格为空（有效点不足 3 个或全部共线）以及定位失败等罕见情况，保证结果始终正确。
     void Triangulation::insert_by_rebuild_(const qdt_vec2d& p)
     {
         input_points.push_back(p);
@@ -906,7 +940,6 @@ namespace wrapper
             }
         }
 
-        // 还没有三角形（点数不足 3 个或全部共线）：直接整体重建
         if (mesh_halfedges_.empty())
         {
             insert_by_rebuild_(p);
@@ -920,7 +953,7 @@ namespace wrapper
             insert_by_rebuild_(p);
             return;
         }
-        const bool outside = (h_start < 0);   // p 在当前凸包之外
+        const bool outside = (h_start < 0);
 
         const size_t new_id = input_points.size();
         input_points.push_back(p);
@@ -940,7 +973,6 @@ namespace wrapper
             return mesh_halfedges_[mesh_halfedges_[e].next].origin;
             };
 
-        // ---- p 在凸包外：收集所有对 p 可见的凸包边（它们在凸包上是连续的一段） ----
         std::vector<int> visible_hull;
         if (outside)
         {
@@ -949,14 +981,12 @@ namespace wrapper
                 const qdt_vec2d& B = mesh_vertices_[he_dest(e)].p;
                 return robust::orient2d(A, B, p) < 0;
                 };
-            // 凸包上 e 的下一条边（起点 = e 的终点）：绕终点旋转直到碰到无 twin 的半边
             auto next_hull = [&](int e) {
                 int x = mesh_halfedges_[e].next;
                 while (mesh_halfedges_[x].twin >= 0)
                     x = mesh_halfedges_[mesh_halfedges_[x].twin].next;
                 return x;
                 };
-            // 凸包上 e 的上一条边（终点 = e 的起点）
             auto prev_hull = [&](int e) {
                 int x = mesh_halfedges_[mesh_halfedges_[e].next].next;
                 while (mesh_halfedges_[x].twin >= 0)
@@ -974,9 +1004,8 @@ namespace wrapper
                 visible_hull.push_back(e);
         }
 
-        // ---- 外接圆包含 p 的三角形构成空洞（BFS） ----
         std::vector<int>        cavity_hes;
-        std::unordered_set<int> cavity_set;
+        std::vector<bool>       visited_tri(triangles.size(), false);
         std::queue<int>         q;
         if (!outside)
             q.push(h_start);
@@ -987,14 +1016,13 @@ namespace wrapper
         while (!q.empty())
         {
             const int h = q.front(); q.pop();
+            const int tri_idx = mesh_halfedges_[h].triangle_idx;
+
+            if (tri_idx < 0 || visited_tri[tri_idx])
+                continue;
 
             const int h1 = mesh_halfedges_[h].next;
             const int h2 = mesh_halfedges_[h1].next;
-            const int canon = std::min({ h, h1, h2 });
-
-            if (cavity_set.count(canon))
-                continue;
-
             const int v0 = mesh_halfedges_[h].origin;
             const int v1 = mesh_halfedges_[h1].origin;
             const int v2 = mesh_halfedges_[h2].origin;
@@ -1008,7 +1036,7 @@ namespace wrapper
             if (ic <= 0)
                 continue;
 
-            cavity_set.insert(canon);
+            visited_tri[tri_idx] = true;
             cavity_hes.push_back(h);
 
             int e = h;
@@ -1021,40 +1049,44 @@ namespace wrapper
             } while (e != h);
         }
 
-        // p 在凸包内时，所在三角形必然在空洞中（容错）；凸包外时空洞可以为空
         if (!outside && cavity_hes.empty())
         {
-            const int h1 = mesh_halfedges_[h_start].next;
-            const int h2 = mesh_halfedges_[h1].next;
-            cavity_set.insert(std::min({ h_start, h1, h2 }));
-            cavity_hes.push_back(h_start);
+            const int tri_idx = mesh_halfedges_[h_start].triangle_idx;
+            if (tri_idx >= 0 && !visited_tri[tri_idx])
+            {
+                visited_tri[tri_idx] = true;
+                cavity_hes.push_back(h_start);
+            }
         }
 
-        // ---- 收集需要与 p 相连的边，每条边生成一个新三角形 (a, b, p) ----
+        std::vector<int> cavity_tri_indices;
+        for (size_t i = 0; i < visited_tri.size(); ++i)
+        {
+            if (visited_tri[i])
+                cavity_tri_indices.push_back(static_cast<int>(i));
+        }
+        std::sort(cavity_tri_indices.rbegin(), cavity_tri_indices.rend());
+        for (int idx : cavity_tri_indices)
+        {
+            remove_triangle_by_index_(idx);
+        }
+
         struct BoundaryInfo { int a, b, external_twin; };
         std::vector<BoundaryInfo> boundary_info;
 
-        // (1) 空洞边界：空洞三角形的边，若对面没有三角形或对面不在空洞中
         for (int h : cavity_hes)
         {
             int e = h;
             do
             {
                 const int tw = mesh_halfedges_[e].twin;
-                bool tw_in_cavity = false;
-                if (tw >= 0)
-                {
-                    const int t1 = mesh_halfedges_[tw].next;
-                    const int t2 = mesh_halfedges_[t1].next;
-                    tw_in_cavity = cavity_set.count(std::min({ tw, t1, t2 })) != 0;
-                }
+                int tw_tri = (tw >= 0) ? mesh_halfedges_[tw].triangle_idx : -1;
+                bool tw_in_cavity = (tw_tri >= 0 && visited_tri[tw_tri]);
 
                 if (!tw_in_cavity)
                 {
                     const int a = mesh_halfedges_[e].origin;
                     const int b = mesh_halfedges_[mesh_halfedges_[e].next].origin;
-                    // 凸包边（tw < 0）只有当 p 严格位于其左侧时才能与 p 组成新三角形；
-                    // p 在其外侧（边被 p 看到）或恰好落在该边上时都不能生成（后者会退化）
                     if (tw >= 0 ||
                         robust::orient2d(mesh_vertices_[a].p, mesh_vertices_[b].p, p) > 0)
                         boundary_info.push_back({ a, b, tw });
@@ -1064,14 +1096,12 @@ namespace wrapper
             } while (e != h);
         }
 
-        // (2) 对 p 可见、且所在三角形不在空洞中的凸包边 a->b：
-        //     新三角形 (b, a, p)，其边 b->a 与凸包半边 a->b 互为 twin
         for (int e : visible_hull)
         {
-            const int e1 = mesh_halfedges_[e].next;
-            const int e2 = mesh_halfedges_[e1].next;
-            if (cavity_set.count(std::min({ e, e1, e2 })))
+            const int tri_idx = mesh_halfedges_[e].triangle_idx;
+            if (tri_idx >= 0 && visited_tri[tri_idx])
                 continue;
+            const int e1 = mesh_halfedges_[e].next;
             const int a = mesh_halfedges_[e].origin;
             const int b = mesh_halfedges_[e1].origin;
             boundary_info.push_back({ b, a, e });
@@ -1097,27 +1127,35 @@ namespace wrapper
             const int h1 = alloc_halfedge_();
             const int h2 = alloc_halfedge_();
 
-            mesh_halfedges_[h0] = { bi.a, bi.external_twin, h1 };
-            mesh_halfedges_[h1] = { bi.b, -1, h2 };
-            mesh_halfedges_[h2] = { new_v, -1, h0 };
+            mesh_halfedges_[h0] = { bi.a, bi.external_twin, h1, -1 };
+            mesh_halfedges_[h1] = { bi.b, -1, h2, -1 };
+            mesh_halfedges_[h2] = { new_v, -1, h0, -1 };
 
             if (bi.external_twin >= 0)
                 mesh_halfedges_[bi.external_twin].twin = h0;
+
+            size_t new_tri_idx = add_triangle_to_output_(
+                mesh_vertices_[bi.a].orig_id,
+                mesh_vertices_[bi.b].orig_id,
+                new_id,
+                h0
+            );
+
+            mesh_halfedges_[h0].triangle_idx = static_cast<int>(new_tri_idx);
+            mesh_halfedges_[h1].triangle_idx = static_cast<int>(new_tri_idx);
+            mesh_halfedges_[h2].triangle_idx = static_cast<int>(new_tri_idx);
 
             new_tris.push_back({ h0, h1, h2 });
         }
 
         if (new_tris.empty())
         {
-            // 不应发生；此时网格已被改动，直接整体重建以保证结果正确
             Triangulation fresh = delaunay_triangulate(
                 input_points.data(), input_points.size(), true);
             *this = std::move(fresh);
             return;
         }
 
-        // 新三角形围绕 p 成扇形：h1 (v->p) 与以 v 为起点的另一个新三角形的 h2 (p->v) 互为 twin。
-        // 凸包外插入时扇形不闭合，两端留下的 twin = -1 的边就是新的凸包边。
         std::unordered_map<int, int> v_to_newv;
         std::unordered_map<int, int> newv_to_v;
 
@@ -1144,9 +1182,8 @@ namespace wrapper
 
         mesh_vertices_[new_v].halfedge = new_tris[0].h2;
         last_face_he_ = new_tris[0].h0;
-
-        rebuild_output_();
     }
+
     Triangulation delaunay_triangulate(Point* pts, size_t sz, bool dwyer)
     {
         const int n = static_cast<int>(sz);
