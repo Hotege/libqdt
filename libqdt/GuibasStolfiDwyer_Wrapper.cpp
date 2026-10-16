@@ -17,6 +17,7 @@
 namespace wrapper
 {
     using Point = qdt_vec2d;
+    Triangulation delaunay_triangulate(Point* pts, size_t sz, bool dwyer);
     namespace robust
     {
         namespace exact
@@ -677,6 +678,475 @@ namespace wrapper
         };
 
     }
+    void Triangulation::ensure_mesh_()
+    {
+        if (mesh_built_) return;
+
+        std::unordered_map<size_t, int> orig_to_local;
+        mesh_vertices_.clear();
+        mesh_halfedges_.clear();
+        free_halfedges_.clear();
+        last_face_he_ = 0;
+
+        for (const auto& t : triangles)
+        {
+            for (int i = 0; i < 3; ++i)
+            {
+                const size_t orig = t[i];
+                if (orig_to_local.find(orig) == orig_to_local.end())
+                {
+                    const int local = static_cast<int>(mesh_vertices_.size());
+                    orig_to_local[orig] = local;
+
+                    MeshVertex v;
+                    v.p = input_points[orig];
+                    v.orig_id = orig;
+                    v.halfedge = -1;
+                    mesh_vertices_.push_back(v);
+                }
+            }
+        }
+
+        std::unordered_map<uint64_t, int> edge_map;
+
+        for (const auto& t : triangles)
+        {
+            int v[3];
+            for (int i = 0; i < 3; ++i)
+                v[i] = orig_to_local[t[i]];
+
+            int h[3];
+            for (int i = 0; i < 3; ++i)
+            {
+                h[i] = static_cast<int>(mesh_halfedges_.size());
+                mesh_halfedges_.push_back({ v[i], -1, -1 });
+            }
+
+            for (int i = 0; i < 3; ++i)
+                mesh_halfedges_[h[i]].next = h[(i + 1) % 3];
+
+            for (int i = 0; i < 3; ++i)
+            {
+                const int a = v[i];
+                const int b = v[(i + 1) % 3];
+
+                const uint64_t key_fwd =
+                    (static_cast<uint64_t>(static_cast<uint32_t>(a)) << 32) |
+                    static_cast<uint32_t>(b);
+                const uint64_t key_rev =
+                    (static_cast<uint64_t>(static_cast<uint32_t>(b)) << 32) |
+                    static_cast<uint32_t>(a);
+
+                auto it = edge_map.find(key_rev);
+                if (it != edge_map.end())
+                {
+                    const int other = it->second;
+                    mesh_halfedges_[h[i]].twin = other;
+                    mesh_halfedges_[other].twin = h[i];
+                    edge_map.erase(it);
+                }
+                else
+                {
+                    edge_map[key_fwd] = h[i];
+                }
+            }
+
+            for (int i = 0; i < 3; ++i)
+            {
+                if (mesh_vertices_[v[i]].halfedge < 0)
+                    mesh_vertices_[v[i]].halfedge = h[i];
+            }
+        }
+
+        mesh_built_ = true;
+    }
+
+    int Triangulation::alloc_halfedge_()
+    {
+        if (!free_halfedges_.empty())
+        {
+            const int h = free_halfedges_.back();
+            free_halfedges_.pop_back();
+            return h;
+        }
+        const int h = static_cast<int>(mesh_halfedges_.size());
+        mesh_halfedges_.push_back({});
+        return h;
+    }
+
+    void Triangulation::free_halfedge_(int h)
+    {
+        mesh_halfedges_[h].origin = -1;
+        mesh_halfedges_[h].twin = -1;
+        mesh_halfedges_[h].next = -1;
+        free_halfedges_.push_back(h);
+    }
+
+    // 定位包含 p 的三角形，返回该三角形的一条半边。
+    // 若 p 位于凸包之外，返回 -1，并通过 hull_he 给出 walk 越过的那条凸包半边
+    // （p 严格位于该边外侧，即该边对 p 可见）。
+    // 返回 -1 且 hull_he == -1 表示定位失败（理论上不应发生）。
+    int Triangulation::locate_(const qdt_vec2d& p, int& hull_he)
+    {
+        hull_he = -1;
+        if (mesh_halfedges_.empty())
+            return -1;
+
+        int h = last_face_he_;
+        if (h < 0 || h >= static_cast<int>(mesh_halfedges_.size()) ||
+            mesh_halfedges_[h].origin < 0)
+        {
+            h = 0;
+            while (h < static_cast<int>(mesh_halfedges_.size()) &&
+                mesh_halfedges_[h].origin < 0)
+                ++h;
+            if (h >= static_cast<int>(mesh_halfedges_.size()))
+                return -1;
+        }
+
+        for (int step = 0; step < 1000000; ++step)
+        {
+            const int h0 = h;
+            const int h1 = mesh_halfedges_[h0].next;
+            const int h2 = mesh_halfedges_[h1].next;
+            if (mesh_halfedges_[h2].next != h0)
+                break;
+
+            const int v0 = mesh_halfedges_[h0].origin;
+            const int v1 = mesh_halfedges_[h1].origin;
+            const int v2 = mesh_halfedges_[h2].origin;
+
+            const qdt_vec2d& A = mesh_vertices_[v0].p;
+            const qdt_vec2d& B = mesh_vertices_[v1].p;
+            const qdt_vec2d& C = mesh_vertices_[v2].p;
+
+            const double o0 = robust::orient2d(A, B, p);
+            const double o1 = robust::orient2d(B, C, p);
+            const double o2 = robust::orient2d(C, A, p);
+
+            if (o0 >= 0 && o1 >= 0 && o2 >= 0)
+            {
+                last_face_he_ = h0;
+                return h0;
+            }
+
+            int cross;
+            if (o0 < 0)      cross = h0;
+            else if (o1 < 0) cross = h1;
+            else             cross = h2;
+
+            const int tw = mesh_halfedges_[cross].twin;
+            if (tw < 0)
+            {
+                hull_he = cross;
+                return -1;
+            }
+
+            h = tw;
+        }
+
+        return -1;
+    }
+
+    void Triangulation::rebuild_output_()
+    {
+        triangles.clear();
+        std::unordered_set<int> visited;
+
+        for (int h = 0; h < static_cast<int>(mesh_halfedges_.size()); ++h)
+        {
+            if (mesh_halfedges_[h].origin < 0)
+                continue;
+
+            const int h1 = mesh_halfedges_[h].next;
+            const int h2 = mesh_halfedges_[h1].next;
+            if (h1 < 0 || h2 < 0)
+                continue;
+            if (mesh_halfedges_[h2].next != h)
+                continue;
+
+            const int canon = std::min({ h, h1, h2 });
+            if (visited.count(canon))
+                continue;
+            visited.insert(canon);
+
+            const int v0 = mesh_halfedges_[h].origin;
+            const int v1 = mesh_halfedges_[h1].origin;
+            const int v2 = mesh_halfedges_[h2].origin;
+
+            triangles.push_back({
+                mesh_vertices_[v0].orig_id,
+                mesh_vertices_[v1].orig_id,
+                mesh_vertices_[v2].orig_id
+                });
+        }
+    }
+
+    // 兜底路径：把点追加到 input_points 后整体重建。
+    // 用于网格为空（有效点不足 3 个或全部共线）以及定位失败等罕见情况，保证结果始终正确。
+    void Triangulation::insert_by_rebuild_(const qdt_vec2d& p)
+    {
+        input_points.push_back(p);
+        Triangulation fresh = delaunay_triangulate(
+            input_points.data(), input_points.size(), true);
+        *this = std::move(fresh);
+    }
+
+    void Triangulation::insert(const qdt_vec2d& p)
+    {
+        ensure_mesh_();
+
+        for (const auto& v : mesh_vertices_)
+        {
+            if (v.p.x == p.x && v.p.y == p.y)
+            {
+                input_points.push_back(p);
+                rep.push_back(v.orig_id);
+                return;
+            }
+        }
+
+        // 还没有三角形（点数不足 3 个或全部共线）：直接整体重建
+        if (mesh_halfedges_.empty())
+        {
+            insert_by_rebuild_(p);
+            return;
+        }
+
+        int hull_he = -1;
+        const int h_start = locate_(p, hull_he);
+        if (h_start < 0 && hull_he < 0)
+        {
+            insert_by_rebuild_(p);
+            return;
+        }
+        const bool outside = (h_start < 0);   // p 在当前凸包之外
+
+        const size_t new_id = input_points.size();
+        input_points.push_back(p);
+        rep.push_back(new_id);
+        ++unique_points;
+
+        const int new_v = static_cast<int>(mesh_vertices_.size());
+        {
+            MeshVertex v;
+            v.p = p;
+            v.orig_id = new_id;
+            v.halfedge = -1;
+            mesh_vertices_.push_back(v);
+        }
+
+        auto he_dest = [&](int e) {
+            return mesh_halfedges_[mesh_halfedges_[e].next].origin;
+            };
+
+        // ---- p 在凸包外：收集所有对 p 可见的凸包边（它们在凸包上是连续的一段） ----
+        std::vector<int> visible_hull;
+        if (outside)
+        {
+            auto is_visible = [&](int e) {
+                const qdt_vec2d& A = mesh_vertices_[mesh_halfedges_[e].origin].p;
+                const qdt_vec2d& B = mesh_vertices_[he_dest(e)].p;
+                return robust::orient2d(A, B, p) < 0;
+                };
+            // 凸包上 e 的下一条边（起点 = e 的终点）：绕终点旋转直到碰到无 twin 的半边
+            auto next_hull = [&](int e) {
+                int x = mesh_halfedges_[e].next;
+                while (mesh_halfedges_[x].twin >= 0)
+                    x = mesh_halfedges_[mesh_halfedges_[x].twin].next;
+                return x;
+                };
+            // 凸包上 e 的上一条边（终点 = e 的起点）
+            auto prev_hull = [&](int e) {
+                int x = mesh_halfedges_[mesh_halfedges_[e].next].next;
+                while (mesh_halfedges_[x].twin >= 0)
+                {
+                    const int tw = mesh_halfedges_[x].twin;
+                    x = mesh_halfedges_[mesh_halfedges_[tw].next].next;
+                }
+                return x;
+                };
+
+            visible_hull.push_back(hull_he);
+            for (int e = next_hull(hull_he); e != hull_he && is_visible(e); e = next_hull(e))
+                visible_hull.push_back(e);
+            for (int e = prev_hull(hull_he); e != hull_he && is_visible(e); e = prev_hull(e))
+                visible_hull.push_back(e);
+        }
+
+        // ---- 外接圆包含 p 的三角形构成空洞（BFS） ----
+        std::vector<int>        cavity_hes;
+        std::unordered_set<int> cavity_set;
+        std::queue<int>         q;
+        if (!outside)
+            q.push(h_start);
+        else
+            for (int e : visible_hull)
+                q.push(e);
+
+        while (!q.empty())
+        {
+            const int h = q.front(); q.pop();
+
+            const int h1 = mesh_halfedges_[h].next;
+            const int h2 = mesh_halfedges_[h1].next;
+            const int canon = std::min({ h, h1, h2 });
+
+            if (cavity_set.count(canon))
+                continue;
+
+            const int v0 = mesh_halfedges_[h].origin;
+            const int v1 = mesh_halfedges_[h1].origin;
+            const int v2 = mesh_halfedges_[h2].origin;
+
+            const double ic = robust::incircle(
+                mesh_vertices_[v0].p,
+                mesh_vertices_[v1].p,
+                mesh_vertices_[v2].p,
+                p);
+
+            if (ic <= 0)
+                continue;
+
+            cavity_set.insert(canon);
+            cavity_hes.push_back(h);
+
+            int e = h;
+            do
+            {
+                const int tw = mesh_halfedges_[e].twin;
+                if (tw >= 0)
+                    q.push(tw);
+                e = mesh_halfedges_[e].next;
+            } while (e != h);
+        }
+
+        // p 在凸包内时，所在三角形必然在空洞中（容错）；凸包外时空洞可以为空
+        if (!outside && cavity_hes.empty())
+        {
+            const int h1 = mesh_halfedges_[h_start].next;
+            const int h2 = mesh_halfedges_[h1].next;
+            cavity_set.insert(std::min({ h_start, h1, h2 }));
+            cavity_hes.push_back(h_start);
+        }
+
+        // ---- 收集需要与 p 相连的边，每条边生成一个新三角形 (a, b, p) ----
+        struct BoundaryInfo { int a, b, external_twin; };
+        std::vector<BoundaryInfo> boundary_info;
+
+        // (1) 空洞边界：空洞三角形的边，若对面没有三角形或对面不在空洞中
+        for (int h : cavity_hes)
+        {
+            int e = h;
+            do
+            {
+                const int tw = mesh_halfedges_[e].twin;
+                bool tw_in_cavity = false;
+                if (tw >= 0)
+                {
+                    const int t1 = mesh_halfedges_[tw].next;
+                    const int t2 = mesh_halfedges_[t1].next;
+                    tw_in_cavity = cavity_set.count(std::min({ tw, t1, t2 })) != 0;
+                }
+
+                if (!tw_in_cavity)
+                {
+                    const int a = mesh_halfedges_[e].origin;
+                    const int b = mesh_halfedges_[mesh_halfedges_[e].next].origin;
+                    // 凸包边（tw < 0）只有当 p 严格位于其左侧时才能与 p 组成新三角形；
+                    // p 在其外侧（边被 p 看到）或恰好落在该边上时都不能生成（后者会退化）
+                    if (tw >= 0 ||
+                        robust::orient2d(mesh_vertices_[a].p, mesh_vertices_[b].p, p) > 0)
+                        boundary_info.push_back({ a, b, tw });
+                }
+
+                e = mesh_halfedges_[e].next;
+            } while (e != h);
+        }
+
+        // (2) 对 p 可见、且所在三角形不在空洞中的凸包边 a->b：
+        //     新三角形 (b, a, p)，其边 b->a 与凸包半边 a->b 互为 twin
+        for (int e : visible_hull)
+        {
+            const int e1 = mesh_halfedges_[e].next;
+            const int e2 = mesh_halfedges_[e1].next;
+            if (cavity_set.count(std::min({ e, e1, e2 })))
+                continue;
+            const int a = mesh_halfedges_[e].origin;
+            const int b = mesh_halfedges_[e1].origin;
+            boundary_info.push_back({ b, a, e });
+        }
+
+        for (int h : cavity_hes)
+        {
+            int e = h;
+            do
+            {
+                const int nxt = mesh_halfedges_[e].next;
+                free_halfedge_(e);
+                e = nxt;
+            } while (e != h);
+        }
+
+        struct NewTri { int h0, h1, h2; };
+        std::vector<NewTri> new_tris;
+
+        for (const auto& bi : boundary_info)
+        {
+            const int h0 = alloc_halfedge_();
+            const int h1 = alloc_halfedge_();
+            const int h2 = alloc_halfedge_();
+
+            mesh_halfedges_[h0] = { bi.a, bi.external_twin, h1 };
+            mesh_halfedges_[h1] = { bi.b, -1, h2 };
+            mesh_halfedges_[h2] = { new_v, -1, h0 };
+
+            if (bi.external_twin >= 0)
+                mesh_halfedges_[bi.external_twin].twin = h0;
+
+            new_tris.push_back({ h0, h1, h2 });
+        }
+
+        if (new_tris.empty())
+        {
+            // 不应发生；此时网格已被改动，直接整体重建以保证结果正确
+            Triangulation fresh = delaunay_triangulate(
+                input_points.data(), input_points.size(), true);
+            *this = std::move(fresh);
+            return;
+        }
+
+        // 新三角形围绕 p 成扇形：h1 (v->p) 与以 v 为起点的另一个新三角形的 h2 (p->v) 互为 twin。
+        // 凸包外插入时扇形不闭合，两端留下的 twin = -1 的边就是新的凸包边。
+        std::unordered_map<int, int> v_to_newv;
+        std::unordered_map<int, int> newv_to_v;
+
+        for (const auto& nt : new_tris)
+        {
+            const int a = mesh_halfedges_[nt.h0].origin;
+            const int b = mesh_halfedges_[nt.h1].origin;
+            v_to_newv[b] = nt.h1;
+            newv_to_v[a] = nt.h2;
+        }
+
+        for (const auto& kv : v_to_newv)
+        {
+            const int v = kv.first;
+            const int h1 = kv.second;
+            auto it = newv_to_v.find(v);
+            if (it != newv_to_v.end())
+            {
+                const int h2 = it->second;
+                mesh_halfedges_[h1].twin = h2;
+                mesh_halfedges_[h2].twin = h1;
+            }
+        }
+
+        mesh_vertices_[new_v].halfedge = new_tris[0].h2;
+        last_face_he_ = new_tris[0].h0;
+
+        rebuild_output_();
+    }
     Triangulation delaunay_triangulate(Point* pts, size_t sz, bool dwyer)
     {
         const int n = static_cast<int>(sz);
@@ -712,6 +1182,11 @@ namespace wrapper
             b.run();
             b.extract(res.triangles);
         }
+
+        res.input_points.resize(sz);
+        for (size_t i = 0; i < sz; ++i)
+            res.input_points[i] = pts[i];
+
         return res;
     }
 }
