@@ -23,7 +23,7 @@ namespace wrapper
         {
             struct Exp
             {
-                static constexpr int LOCAL_CAP = 32;
+                static constexpr int LOCAL_CAP = 8;
                 double local_buf[LOCAL_CAP];
                 double* heap_ptr = nullptr;
                 int size = 0;
@@ -706,42 +706,6 @@ namespace wrapper
         triangle_to_he_.pop_back();
     }
 
-    struct EdgeRecord {
-        uint32_t u, v;
-        int halfedge_idx;
-
-        uint64_t sort_key() const {
-            uint32_t lo = (u < v) ? u : v;
-            uint32_t hi = (u < v) ? v : u;
-            return (static_cast<uint64_t>(lo) << 32) | hi;
-        }
-    };
-
-    // 64 位基数排序（Radix Sort），4 轮 16 位，O(N) 线性时间，无分支、无哈希冲突
-    inline void radix_sort_edges(std::vector<EdgeRecord>& edges) {
-        size_t n = edges.size();
-        if (n <= 1) return;
-        std::vector<EdgeRecord> temp(n);
-        for (int shift = 0; shift < 64; shift += 16) {
-            size_t count[65536] = { 0 };
-            for (size_t i = 0; i < n; ++i) {
-                uint16_t bucket = (edges[i].sort_key() >> shift) & 0xFFFF;
-                count[bucket]++;
-            }
-            size_t total = 0;
-            for (size_t i = 0; i < 65536; ++i) {
-                size_t cnt = count[i];
-                count[i] = total;
-                total += cnt;
-            }
-            for (size_t i = 0; i < n; ++i) {
-                uint16_t bucket = (edges[i].sort_key() >> shift) & 0xFFFF;
-                temp[count[bucket]++] = edges[i];
-            }
-            edges.swap(temp);
-        }
-    }
-
     void Triangulation::ensure_mesh_()
     {
         if (mesh_built_) return;
@@ -752,18 +716,22 @@ namespace wrapper
         last_face_he_ = 0;
         triangle_to_he_.clear();
 
-        std::vector<int> orig_to_local(input_points.size(), -1);
+        const size_t nTri = triangles.size();
+        const size_t nHE = 3 * nTri;
 
-        for (const auto& t : triangles)
+        std::vector<int> orig_to_local(input_points.size(), -1);
+        mesh_vertices_.reserve(nTri * 3);
+
+        for (size_t t = 0; t < nTri; ++t)
         {
+            const auto& tri = triangles[t];
             for (int i = 0; i < 3; ++i)
             {
-                const size_t orig = t[i];
-                if (orig_to_local[orig] < 0)
+                const size_t orig = tri[i];
+                int& slot = orig_to_local[orig];
+                if (slot < 0)
                 {
-                    const int local = static_cast<int>(mesh_vertices_.size());
-                    orig_to_local[orig] = local;
-
+                    slot = static_cast<int>(mesh_vertices_.size());
                     MeshVertex v;
                     v.p = input_points[orig];
                     v.orig_id = orig;
@@ -773,61 +741,80 @@ namespace wrapper
             }
         }
 
-        mesh_halfedges_.reserve(3 * triangles.size());
-        triangle_to_he_.reserve(triangles.size());
+        mesh_halfedges_.resize(nHE);
+        triangle_to_he_.resize(nTri);
 
-        std::vector<EdgeRecord> edge_records;
-        edge_records.reserve(3 * triangles.size());
-
-        int h_idx = 0;
-        std::vector<std::array<size_t, 3>> old_triangles = std::move(triangles);
-        triangles.clear();
-        triangles.reserve(old_triangles.size());
-
-        for (size_t tri_idx = 0; tri_idx < old_triangles.size(); ++tri_idx)
+        MeshHalfEdge* __restrict he_ptr = mesh_halfedges_.data();
+        for (size_t t = 0; t < nTri; ++t)
         {
-            const auto& t = old_triangles[tri_idx];
-            int v[3];
-            for (int i = 0; i < 3; ++i)
-                v[i] = orig_to_local[t[i]];
+            const auto& tri = triangles[t];
+            const int v0 = orig_to_local[tri[0]];
+            const int v1 = orig_to_local[tri[1]];
+            const int v2 = orig_to_local[tri[2]];
 
-            int h[3];
-            for (int i = 0; i < 3; ++i)
-            {
-                h[i] = h_idx++;
-                mesh_halfedges_.push_back({ v[i], -1, -1, static_cast<int>(tri_idx) });
-            }
+            const int base = static_cast<int>(3 * t);
 
-            for (int i = 0; i < 3; ++i)
-                mesh_halfedges_[h[i]].next = h[(i + 1) % 3];
+            he_ptr[base + 0].origin = v0;
+            he_ptr[base + 0].twin = -1;
+            he_ptr[base + 0].next = base + 1;
+            he_ptr[base + 0].triangle_idx = static_cast<int>(t);
 
-            for (int i = 0; i < 3; ++i)
-            {
-                if (mesh_vertices_[v[i]].halfedge < 0)
-                    mesh_vertices_[v[i]].halfedge = h[i];
-            }
+            he_ptr[base + 1].origin = v1;
+            he_ptr[base + 1].twin = -1;
+            he_ptr[base + 1].next = base + 2;
+            he_ptr[base + 1].triangle_idx = static_cast<int>(t);
 
-            edge_records.push_back({ static_cast<uint32_t>(v[0]), static_cast<uint32_t>(v[1]), h[0] });
-            edge_records.push_back({ static_cast<uint32_t>(v[1]), static_cast<uint32_t>(v[2]), h[1] });
-            edge_records.push_back({ static_cast<uint32_t>(v[2]), static_cast<uint32_t>(v[0]), h[2] });
+            he_ptr[base + 2].origin = v2;
+            he_ptr[base + 2].twin = -1;
+            he_ptr[base + 2].next = base + 0;
+            he_ptr[base + 2].triangle_idx = static_cast<int>(t);
 
-            triangles.push_back(t);
-            triangle_to_he_.push_back(h[0]);
+            if (mesh_vertices_[v0].halfedge < 0) mesh_vertices_[v0].halfedge = base + 0;
+            if (mesh_vertices_[v1].halfedge < 0) mesh_vertices_[v1].halfedge = base + 1;
+            if (mesh_vertices_[v2].halfedge < 0) mesh_vertices_[v2].halfedge = base + 2;
+
+            triangle_to_he_[t] = base;
         }
 
-        // 1. 使用超高速基数排序代替 std::sort 与哈希表
-        radix_sort_edges(edge_records);
+        const int nV = static_cast<int>(mesh_vertices_.size());
 
-        // 2. 线性扫描配对 Twin 边
-        for (size_t i = 0; i + 1 < edge_records.size(); ++i)
+        std::vector<int> offset(nV + 1, 0);
+        for (size_t i = 0; i < nHE; ++i)
+            ++offset[he_ptr[i].origin + 1];
+        for (int v = 0; v < nV; ++v)
+            offset[v + 1] += offset[v];
+
+        std::vector<int> adj(nHE);
         {
-            const auto& e1 = edge_records[i];
-            const auto& e2 = edge_records[i + 1];
-            if (e1.sort_key() == e2.sort_key() && e1.u != e2.u)
+            std::vector<int> cursor(offset.begin(), offset.begin() + nV);
+            for (size_t i = 0; i < nHE; ++i)
             {
-                mesh_halfedges_[e1.halfedge_idx].twin = e2.halfedge_idx;
-                mesh_halfedges_[e2.halfedge_idx].twin = e1.halfedge_idx;
-                ++i;
+                const int u = he_ptr[i].origin;
+                adj[cursor[u]++] = static_cast<int>(i);
+            }
+        }
+
+        for (size_t i = 0; i < nHE; ++i)
+        {
+            if (he_ptr[i].twin >= 0) continue;
+
+            const int u = he_ptr[i].origin;
+            const int v = he_ptr[he_ptr[i].next].origin;
+
+            const int start = offset[v];
+            const int end = offset[v + 1];
+
+            for (int k = start; k < end; ++k)
+            {
+                const int h2 = adj[k];
+                if (he_ptr[h2].origin != v) continue;
+                const int u2 = he_ptr[he_ptr[h2].next].origin;
+                if (u2 == u)
+                {
+                    he_ptr[i].twin = h2;
+                    he_ptr[h2].twin = static_cast<int>(i);
+                    break;
+                }
             }
         }
 
