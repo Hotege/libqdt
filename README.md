@@ -290,14 +290,6 @@ The following benchmark uses 2,624,409 input points. Point generation
 timings depend on CPU, compiler, optimization flags, and thread count. The
 relative comparison is more useful.
 
-| Setup | Value |
-| --- | --- |
-| CPU / hardware threads | _fill in_ |
-| OS | _fill in_ |
-| Compiler and flags | _fill in_ |
-| CGAL version and kernel | _fill in_ |
-| Point distribution | _fill in (e.g. uniform random in the unit square)_ |
-
 ### Batch comparison
 
 ```text
