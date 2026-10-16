@@ -36,9 +36,9 @@ namespace parallel
             if (n == 0) n = 1;
             for (size_t i = 0; i < n; ++i)
                 workers_.emplace_back([this, i] {
-                    tls_slot = static_cast<int>(i) + 1;
-                    worker_loop();
-                });
+                tls_slot = static_cast<int>(i) + 1;
+                worker_loop();
+                    });
         }
 
         size_t size() const { return workers_.size(); }
@@ -862,6 +862,11 @@ namespace parallel
                 b.extract(res.triangles);
             }
         }
+
+        res.input_points.resize(sz);
+        for (size_t i = 0; i < sz; ++i)
+            res.input_points[i] = pts[i];
+
         return res;
     }
 }
