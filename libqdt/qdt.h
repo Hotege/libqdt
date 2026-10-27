@@ -36,6 +36,13 @@ struct qdt_vec2d
 };
 typedef struct qdt_vec2d qdt_vec2d;
 
+struct qdt_edge
+{
+    size_t v0;
+    size_t v1;
+};
+typedef struct qdt_edge qdt_edge;
+
 /**
  * @brief Opaque handle to a Delaunay triangulation context.
  *
@@ -134,6 +141,10 @@ QDT_API size_t qdt_insert_point(qdt_t* ptr, qdt_vec2d pt);
  *         (including duplicates), or 0 if ptr is NULL.
  */
 QDT_API size_t qdt_insert_point_parallel(qdt_t* ptr, qdt_vec2d pt);
+
+QDT_API size_t qdt_insert_constraint(qdt_t* ptr, size_t v0, size_t v1);
+
+QDT_API size_t qdt_insert_constraints_batch(qdt_t* ptr, const qdt_edge* edges, size_t num_edges);
 
 /**
  * @brief Returns the current number of triangles in the context.

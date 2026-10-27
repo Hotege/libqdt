@@ -20,6 +20,7 @@ namespace wrapper
 {
     using Point = qdt_vec2d;
     Triangulation delaunay_triangulate(Point* pts, size_t sz);
+
     namespace robust
     {
         namespace exact
@@ -272,13 +273,11 @@ namespace wrapper
                     return 0;
                 return e.back() > 0 ? 1 : -1;
             }
-
         }
 
         constexpr double EPS = 1.1102230246251565e-16;
         constexpr double ERR_ORIENT = (3.0 + 16.0 * EPS) * EPS;
         constexpr double ERR_INCIRCLE = (10.0 + 96.0 * EPS) * EPS;
-
 
 #if defined(_MSC_VER)
 #define ROBUST_NOINLINE __declspec(noinline)
@@ -350,6 +349,7 @@ namespace wrapper
             return incircle_exact(a, b, c, d);
         }
     }
+
     namespace detail
     {
         struct Vtx : Point
@@ -364,18 +364,9 @@ namespace wrapper
             return a.y < b.y || (a.y == b.y && a.x > b.x);
         }
 
-        inline int rot(int e)
-        {
-            return (e & ~3) | ((e + 1) & 3);
-        }
-        inline int invrot(int e)
-        {
-            return (e & ~3) | ((e + 3) & 3);
-        }
-        inline int sym(int e)
-        {
-            return e ^ 2;
-        }
+        inline int rot(int e) { return (e & ~3) | ((e + 1) & 3); }
+        inline int invrot(int e) { return (e & ~3) | ((e + 3) & 3); }
+        inline int sym(int e) { return e ^ 2; }
 
         struct QE
         {
@@ -386,92 +377,47 @@ namespace wrapper
         class Builder
         {
         public:
-            Builder(std::vector<Vtx>& v) : V(v)
-            {
-                qe.reserve(3 * V.size() + 16);
-            }
-
-            void run()
-            {
-                build(0, static_cast<int>(V.size()), 0, 0, true);
-            }
-
+            Builder(std::vector<Vtx>& v) : V(v) { qe.reserve(3 * V.size() + 16); }
+            void run() { build(0, static_cast<int>(V.size()), 0, 0, true); }
             void extract(std::vector<std::array<size_t, 3>>& out) const
             {
                 out.reserve(2 * V.size());
                 for (size_t k = 0; k < qe.size(); ++k)
                 {
-                    if (qe[k].vtx[0] < 0)
-                        continue;
+                    if (qe[k].vtx[0] < 0) continue;
                     for (int r = 0; r < 4; r += 2)
                     {
                         const int e = static_cast<int>(4 * k) + r;
                         const int f = lnext(e), g = lnext(f);
-                        if (lnext(g) != e)
-                            continue;
-                        if (e > f || e > g)
-                            continue;
+                        if (lnext(g) != e) continue;
+                        if (e > f || e > g) continue;
                         const int a = org(e), b = org(f), c = org(g);
                         if (robust::orient2d(V[a], V[b], V[c]) > 0)
                             out.push_back({ V[a].id, V[b].id, V[c].id });
                     }
                 }
             }
-
         private:
             std::vector<Vtx>& V;
             std::vector<QE> qe;
             int freeHead = -1;
 
-            int onext(int e) const
-            {
-                return qe[e >> 2].next[e & 3];
-            }
-            int org(int e) const
-            {
-                return qe[e >> 2].vtx[(e >> 1) & 1];
-            }
-            int dest(int e) const
-            {
-                return org(sym(e));
-            }
-            void setOrg(int e, int v)
-            {
-                qe[e >> 2].vtx[(e >> 1) & 1] = v;
-            }
-
-            int oprev(int e) const
-            {
-                return rot(onext(rot(e)));
-            }
-            int lnext(int e) const
-            {
-                return rot(onext(invrot(e)));
-            }
-            int rprev(int e) const
-            {
-                return onext(sym(e));
-            }
+            int onext(int e) const { return qe[e >> 2].next[e & 3]; }
+            int org(int e) const { return qe[e >> 2].vtx[(e >> 1) & 1]; }
+            int dest(int e) const { return org(sym(e)); }
+            void setOrg(int e, int v) { qe[e >> 2].vtx[(e >> 1) & 1] = v; }
+            int oprev(int e) const { return rot(onext(rot(e))); }
+            int lnext(int e) const { return rot(onext(invrot(e))); }
+            int rprev(int e) const { return onext(sym(e)); }
 
             int makeEdge()
             {
                 int k;
-                if (freeHead >= 0)
-                {
-                    k = freeHead;
-                    freeHead = qe[k].next[0];
-                }
-                else
-                {
-                    k = static_cast<int>(qe.size());
-                    qe.emplace_back();
-                }
+                if (freeHead >= 0) { k = freeHead; freeHead = qe[k].next[0]; }
+                else { k = static_cast<int>(qe.size()); qe.emplace_back(); }
                 QE& q = qe[k];
                 const int e = 4 * k;
-                q.next[0] = e;
-                q.next[1] = e + 3;
-                q.next[2] = e + 2;
-                q.next[3] = e + 1;
+                q.next[0] = e; q.next[1] = e + 3; q.next[2] = e + 2; q.next[3] = e + 1;
                 q.vtx[0] = q.vtx[1] = -1;
                 return e;
             }
@@ -480,8 +426,7 @@ namespace wrapper
             {
                 const int alpha = rot(onext(a)), beta = rot(onext(b));
                 std::swap(qe[a >> 2].next[a & 3], qe[b >> 2].next[b & 3]);
-                std::swap(qe[alpha >> 2].next[alpha & 3],
-                    qe[beta >> 2].next[beta & 3]);
+                std::swap(qe[alpha >> 2].next[alpha & 3], qe[beta >> 2].next[beta & 3]);
             }
 
             int connect(int a, int b)
@@ -503,27 +448,13 @@ namespace wrapper
                 freeHead = k;
             }
 
-            bool ccw(int a, int b, int c) const
-            {
-                return robust::orient2d(V[a], V[b], V[c]) > 0;
-            }
-            bool rightOf(int x, int e) const
-            {
-                return ccw(x, dest(e), org(e));
-            }
-            bool leftOf(int x, int e) const
-            {
-                return ccw(x, org(e), dest(e));
-            }
+            bool ccw(int a, int b, int c) const { return robust::orient2d(V[a], V[b], V[c]) > 0; }
+            bool rightOf(int x, int e) const { return ccw(x, dest(e), org(e)); }
+            bool leftOf(int x, int e) const { return ccw(x, org(e), dest(e)); }
             bool inCircle(int a, int b, int c, int d) const
             {
-                if (a == d || b == d || c == d || a == b || a == c || b == c)
-                    return false;
+                if (a == d || b == d || c == d || a == b || a == c || b == c) return false;
                 return robust::incircle(V[a], V[b], V[c], V[d]) > 0;
-            }
-            bool valid(int e, int basel) const
-            {
-                return rightOf(dest(e), basel);
             }
 
             std::pair<int, int> leaf(int lo, int hi, int frame)
@@ -535,28 +466,16 @@ namespace wrapper
                 if (n == 2)
                 {
                     const int a = makeEdge();
-                    setOrg(a, s1);
-                    setOrg(sym(a), s2);
+                    setOrg(a, s1); setOrg(sym(a), s2);
                     return { a, sym(a) };
                 }
                 const int s3 = lo + 2;
                 const int a = makeEdge(), b = makeEdge();
                 splice(sym(a), b);
-                setOrg(a, s1);
-                setOrg(sym(a), s2);
-                setOrg(b, s2);
-                setOrg(sym(b), s3);
+                setOrg(a, s1); setOrg(sym(a), s2); setOrg(b, s2); setOrg(sym(b), s3);
                 const double o = robust::orient2d(V[s1], V[s2], V[s3]);
-                if (o > 0)
-                {
-                    connect(b, a);
-                    return { a, sym(b) };
-                }
-                if (o < 0)
-                {
-                    const int c = connect(b, a);
-                    return { sym(c), c };
-                }
+                if (o > 0) { connect(b, a); return { a, sym(b) }; }
+                if (o < 0) { const int c = connect(b, a); return { sym(c), c }; }
                 return { a, sym(b) };
             }
 
@@ -564,18 +483,13 @@ namespace wrapper
             {
                 for (;;)
                 {
-                    if (leftOf(org(rdi), ldi))
-                        ldi = lnext(ldi);
-                    else if (rightOf(org(ldi), rdi))
-                        rdi = rprev(rdi);
-                    else
-                        break;
+                    if (leftOf(org(rdi), ldi)) ldi = lnext(ldi);
+                    else if (rightOf(org(ldi), rdi)) rdi = rprev(rdi);
+                    else break;
                 }
                 int basel = connect(sym(rdi), ldi);
-                if (org(ldi) == org(ldo))
-                    ldo = sym(basel);
-                if (org(rdi) == org(rdo))
-                    rdo = basel;
+                if (org(ldi) == org(ldo)) ldo = sym(basel);
+                if (org(rdi) == org(rdo)) rdo = basel;
 
                 for (;;)
                 {
@@ -610,8 +524,7 @@ namespace wrapper
                         }
                         if (deleted) rv = validE(rc);
                     }
-                    if (!lv && !rv)
-                        break;
+                    if (!lv && !rv) break;
                     if (!lv || (rv && inCircle(dest(lc), bd, bo, dest(rc))))
                         basel = connect(rc, sym(basel));
                     else
@@ -630,20 +543,16 @@ namespace wrapper
                 {
                     const int nx = rprev(e);
                     const int pv = sym(oprev(e));
-                    if (better(org(nx), org(e)))
-                        e = nx;
-                    else if (better(org(pv), org(e)))
-                        e = pv;
-                    else
-                        return e;
+                    if (better(org(nx), org(e))) e = nx;
+                    else if (better(org(pv), org(e))) e = pv;
+                    else return e;
                 }
             }
 
             std::pair<int, int> build(int lo, int hi, int axis, int outAxis, bool presorted)
             {
                 const int n = hi - lo;
-                if (n <= 3)
-                    return leaf(lo, hi, outAxis);
+                if (n <= 3) return leaf(lo, hi, outAxis);
 
                 const int mid = lo + n / 2;
                 if (!presorted)
@@ -678,7 +587,6 @@ namespace wrapper
                 return res;
             }
         };
-
     }
 
     size_t Triangulation::add_triangle_to_output_(size_t id0, size_t id1, size_t id2, int h0)
@@ -756,20 +664,9 @@ namespace wrapper
 
             const int base = static_cast<int>(3 * t);
 
-            he_ptr[base + 0].origin = v0;
-            he_ptr[base + 0].twin = -1;
-            he_ptr[base + 0].next = base + 1;
-            he_ptr[base + 0].triangle_idx = static_cast<int>(t);
-
-            he_ptr[base + 1].origin = v1;
-            he_ptr[base + 1].twin = -1;
-            he_ptr[base + 1].next = base + 2;
-            he_ptr[base + 1].triangle_idx = static_cast<int>(t);
-
-            he_ptr[base + 2].origin = v2;
-            he_ptr[base + 2].twin = -1;
-            he_ptr[base + 2].next = base + 0;
-            he_ptr[base + 2].triangle_idx = static_cast<int>(t);
+            he_ptr[base + 0] = { v0, -1, base + 1, static_cast<int>(t), false };
+            he_ptr[base + 1] = { v1, -1, base + 2, static_cast<int>(t), false };
+            he_ptr[base + 2] = { v2, -1, base + 0, static_cast<int>(t), false };
 
             if (mesh_vertices_[v0].halfedge < 0) mesh_vertices_[v0].halfedge = base + 0;
             if (mesh_vertices_[v1].halfedge < 0) mesh_vertices_[v1].halfedge = base + 1;
@@ -892,20 +789,9 @@ namespace wrapper
                     const int v2 = orig_to_local[tri[2]];
                     const int base = static_cast<int>(3 * t);
 
-                    hp[base + 0].origin = v0;
-                    hp[base + 0].twin = -1;
-                    hp[base + 0].next = base + 1;
-                    hp[base + 0].triangle_idx = static_cast<int>(t);
-
-                    hp[base + 1].origin = v1;
-                    hp[base + 1].twin = -1;
-                    hp[base + 1].next = base + 2;
-                    hp[base + 1].triangle_idx = static_cast<int>(t);
-
-                    hp[base + 2].origin = v2;
-                    hp[base + 2].twin = -1;
-                    hp[base + 2].next = base + 0;
-                    hp[base + 2].triangle_idx = static_cast<int>(t);
+                    hp[base + 0] = { v0, -1, base + 1, static_cast<int>(t), false };
+                    hp[base + 1] = { v1, -1, base + 2, static_cast<int>(t), false };
+                    hp[base + 2] = { v2, -1, base + 0, static_cast<int>(t), false };
 
                     triangle_to_he_[t] = base;
 
@@ -933,8 +819,7 @@ namespace wrapper
         }
 
         for (int i = 0; i < nV; ++i)
-            mesh_vertices_[i].halfedge =
-            v_he[i].load(std::memory_order_relaxed);
+            mesh_vertices_[i].halfedge = v_he[i].load(std::memory_order_relaxed);
 
         std::vector<int> offset(nV + 1, 0);
         {
@@ -1018,14 +903,14 @@ namespace wrapper
         mesh_halfedges_[h].twin = -1;
         mesh_halfedges_[h].next = -1;
         mesh_halfedges_[h].triangle_idx = -1;
+        mesh_halfedges_[h].is_constrained = false;
         free_halfedges_.push_back(h);
     }
 
     int Triangulation::locate_(const qdt_vec2d& p, int& hull_he)
     {
         hull_he = -1;
-        if (mesh_halfedges_.empty())
-            return -1;
+        if (mesh_halfedges_.empty()) return -1;
 
         int h = last_face_he_;
         if (h < 0 || h >= static_cast<int>(mesh_halfedges_.size()) ||
@@ -1035,8 +920,7 @@ namespace wrapper
             while (h < static_cast<int>(mesh_halfedges_.size()) &&
                 mesh_halfedges_[h].origin < 0)
                 ++h;
-            if (h >= static_cast<int>(mesh_halfedges_.size()))
-                return -1;
+            if (h >= static_cast<int>(mesh_halfedges_.size())) return -1;
         }
 
         for (int step = 0; step < 1000000; ++step)
@@ -1044,8 +928,7 @@ namespace wrapper
             const int h0 = h;
             const int h1 = mesh_halfedges_[h0].next;
             const int h2 = mesh_halfedges_[h1].next;
-            if (mesh_halfedges_[h2].next != h0)
-                break;
+            if (mesh_halfedges_[h2].next != h0) break;
 
             const int v0 = mesh_halfedges_[h0].origin;
             const int v1 = mesh_halfedges_[h1].origin;
@@ -1179,9 +1062,9 @@ namespace wrapper
                 visible_hull.push_back(e);
         }
 
-        std::vector<int>        cavity_hes;
-        std::vector<bool>       visited_tri(triangles.size(), false);
-        std::queue<int>         q;
+        std::vector<int>  cavity_hes;
+        std::vector<bool> visited_tri(triangles.size(), false);
+        std::queue<int>   q;
         if (!outside)
             q.push(h_start);
         else
@@ -1208,8 +1091,7 @@ namespace wrapper
                 mesh_vertices_[v2].p,
                 p);
 
-            if (ic <= 0)
-                continue;
+            if (ic <= 0) continue;
 
             visited_tri[tri_idx] = true;
             cavity_hes.push_back(h);
@@ -1218,8 +1100,7 @@ namespace wrapper
             do
             {
                 const int tw = mesh_halfedges_[e].twin;
-                if (tw >= 0)
-                    q.push(tw);
+                if (tw >= 0) q.push(tw);
                 e = mesh_halfedges_[e].next;
             } while (e != h);
         }
@@ -1234,7 +1115,7 @@ namespace wrapper
             }
         }
 
-        struct BoundaryInfo { int a, b, external_twin; };
+        struct BoundaryInfo { int a, b, external_twin; bool is_constrained; };
         std::vector<BoundaryInfo> boundary_info;
 
         for (int h : cavity_hes)
@@ -1252,7 +1133,7 @@ namespace wrapper
                     const int b = mesh_halfedges_[mesh_halfedges_[e].next].origin;
                     if (tw >= 0 ||
                         robust::orient2d(mesh_vertices_[a].p, mesh_vertices_[b].p, p) > 0)
-                        boundary_info.push_back({ a, b, tw });
+                        boundary_info.push_back({ a, b, tw, mesh_halfedges_[e].is_constrained });
                 }
 
                 e = mesh_halfedges_[e].next;
@@ -1267,7 +1148,7 @@ namespace wrapper
             const int e1 = mesh_halfedges_[e].next;
             const int a = mesh_halfedges_[e].origin;
             const int b = mesh_halfedges_[e1].origin;
-            boundary_info.push_back({ b, a, e });
+            boundary_info.push_back({ b, a, e, mesh_halfedges_[e].is_constrained });
         }
 
         std::vector<int> cavity_tri_indices;
@@ -1302,12 +1183,15 @@ namespace wrapper
             const int h1 = alloc_halfedge_();
             const int h2 = alloc_halfedge_();
 
-            mesh_halfedges_[h0] = { bi.a, bi.external_twin, h1, -1 };
-            mesh_halfedges_[h1] = { bi.b, -1, h2, -1 };
-            mesh_halfedges_[h2] = { new_v, -1, h0, -1 };
+            mesh_halfedges_[h0] = { bi.a, bi.external_twin, h1, -1, bi.is_constrained };
+            mesh_halfedges_[h1] = { bi.b, -1, h2, -1, false };
+            mesh_halfedges_[h2] = { new_v, -1, h0, -1, false };
 
             if (bi.external_twin >= 0)
+            {
                 mesh_halfedges_[bi.external_twin].twin = h0;
+                mesh_halfedges_[bi.external_twin].is_constrained = bi.is_constrained;
+            }
 
             size_t new_tri_idx = add_triangle_to_output_(
                 mesh_vertices_[bi.a].orig_id,
@@ -1357,6 +1241,299 @@ namespace wrapper
 
         mesh_vertices_[new_v].halfedge = new_tris[0].h2;
         last_face_he_ = new_tris[0].h0;
+    }
+
+    int Triangulation::orig_to_local_vtx_(size_t orig_id) const
+    {
+        for (size_t i = 0; i < mesh_vertices_.size(); ++i)
+        {
+            if (mesh_vertices_[i].orig_id == orig_id)
+                return static_cast<int>(i);
+        }
+        return -1;
+    }
+
+    int Triangulation::find_halfedge_(int u_local, int v_local) const
+    {
+        int start = mesh_vertices_[u_local].halfedge;
+        if (start < 0) return -1;
+        int cur = start;
+        do {
+            int dest = mesh_halfedges_[mesh_halfedges_[cur].next].origin;
+            if (dest == v_local) return cur;
+            int tw = mesh_halfedges_[cur].twin;
+            if (tw < 0) break;
+            cur = mesh_halfedges_[tw].next;
+        } while (cur != start && cur >= 0);
+
+        for (size_t i = 0; i < mesh_halfedges_.size(); ++i)
+        {
+            if (mesh_halfedges_[i].origin == u_local)
+            {
+                int dest = mesh_halfedges_[mesh_halfedges_[i].next].origin;
+                if (dest == v_local) return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+
+    bool Triangulation::flip_edge_(int h)
+    {
+        int tw = mesh_halfedges_[h].twin;
+        if (tw < 0) return false;
+        if (mesh_halfedges_[h].is_constrained) return false;
+
+        int h_next = mesh_halfedges_[h].next;
+        int h_prev = mesh_halfedges_[h_next].next;
+
+        int tw_next = mesh_halfedges_[tw].next;
+        int tw_prev = mesh_halfedges_[tw_next].next;
+
+        int a = mesh_halfedges_[h].origin;
+        int b = mesh_halfedges_[h_next].origin;
+        int c = mesh_halfedges_[tw].origin;
+        int d = mesh_halfedges_[tw_next].origin;
+
+        if (robust::orient2d(mesh_vertices_[a].p, mesh_vertices_[b].p, mesh_vertices_[d].p) <= 0 ||
+            robust::orient2d(mesh_vertices_[c].p, mesh_vertices_[d].p, mesh_vertices_[b].p) <= 0)
+        {
+            return false;
+        }
+
+        mesh_halfedges_[h].origin = d;
+        mesh_halfedges_[h].next = h_prev;
+        mesh_halfedges_[h_prev].next = tw_next;
+        mesh_halfedges_[tw_next].next = h;
+
+        mesh_halfedges_[tw].origin = b;
+        mesh_halfedges_[tw].next = tw_prev;
+        mesh_halfedges_[tw_prev].next = h_next;
+        mesh_halfedges_[h_next].next = tw;
+
+        int tri1 = mesh_halfedges_[h].triangle_idx;
+        int tri2 = mesh_halfedges_[tw].triangle_idx;
+
+        mesh_halfedges_[h_prev].triangle_idx = tri1;
+        mesh_halfedges_[tw_next].triangle_idx = tri1;
+
+        mesh_halfedges_[tw_prev].triangle_idx = tri2;
+        mesh_halfedges_[h_next].triangle_idx = tri2;
+
+        triangles[tri1] = { mesh_vertices_[d].orig_id, mesh_vertices_[c].orig_id, mesh_vertices_[b].orig_id };
+        triangles[tri2] = { mesh_vertices_[b].orig_id, mesh_vertices_[a].orig_id, mesh_vertices_[d].orig_id };
+
+        mesh_vertices_[a].halfedge = tw_next;
+        mesh_vertices_[c].halfedge = h_prev;
+        mesh_vertices_[b].halfedge = tw;
+        mesh_vertices_[d].halfedge = h;
+
+        return true;
+    }
+
+    bool Triangulation::segment_intersects_(const qdt_vec2d& a, const qdt_vec2d& b, const qdt_vec2d& c, const qdt_vec2d& d) const
+    {
+        double o1 = robust::orient2d(a, b, c);
+        double o2 = robust::orient2d(a, b, d);
+        double o3 = robust::orient2d(c, d, a);
+        double o4 = robust::orient2d(c, d, b);
+
+        return ((o1 > 0 && o2 < 0) || (o1 < 0 && o2 > 0)) &&
+            ((o3 > 0 && o4 < 0) || (o3 < 0 && o4 > 0));
+    }
+
+    void Triangulation::triangulate_polygon_(const std::vector<int>& poly, std::vector<int>& new_edges)
+    {
+        if (poly.size() < 3) return;
+        if (poly.size() == 3) return;
+
+        int n = static_cast<int>(poly.size());
+        int best_split = -1;
+
+        for (int i = 0; i < n; ++i)
+        {
+            int j = (i + 2) % n;
+            if (i == 0 && j == n - 1) continue;
+
+            int u = poly[i];
+            int v = poly[j];
+
+            bool valid = true;
+            for (int k = 0; k < n; ++k)
+            {
+                int p1 = poly[k];
+                int p2 = poly[(k + 1) % n];
+                if (p1 == u || p1 == v || p2 == u || p2 == v) continue;
+                if (segment_intersects_(mesh_vertices_[u].p, mesh_vertices_[v].p, mesh_vertices_[p1].p, mesh_vertices_[p2].p))
+                {
+                    valid = false;
+                    break;
+                }
+            }
+
+            if (valid)
+            {
+                best_split = i;
+                break;
+            }
+        }
+
+        if (best_split != -1)
+        {
+            int i = best_split;
+            int j = (i + 2) % n;
+
+            std::vector<int> poly1, poly2;
+            for (int k = i; k != j; k = (k + 1) % n) poly1.push_back(poly[k]);
+            poly1.push_back(poly[j]);
+
+            for (int k = j; k != i; k = (k + 1) % n) poly2.push_back(poly[k]);
+            poly2.push_back(poly[i]);
+
+            triangulate_polygon_(poly1, new_edges);
+            triangulate_polygon_(poly2, new_edges);
+        }
+    }
+
+    bool Triangulation::insert_constraint(size_t orig_v0, size_t orig_v1)
+    {
+        if (orig_v0 == orig_v1) return false;
+        ensure_mesh_();
+
+        orig_v0 = rep[orig_v0];
+        orig_v1 = rep[orig_v1];
+
+        int u = orig_to_local_vtx_(orig_v0);
+        int v = orig_to_local_vtx_(orig_v1);
+
+        if (u < 0 || v < 0) return false;
+
+        int existing_he = find_halfedge_(u, v);
+        if (existing_he >= 0)
+        {
+            mesh_halfedges_[existing_he].is_constrained = true;
+            int tw = mesh_halfedges_[existing_he].twin;
+            if (tw >= 0) mesh_halfedges_[tw].is_constrained = true;
+            return true;
+        }
+
+        const qdt_vec2d& Pu = mesh_vertices_[u].p;
+        const qdt_vec2d& Pv = mesh_vertices_[v].p;
+
+        std::vector<int> crossed_edges;
+        int current_v = u;
+        int cur_he = mesh_vertices_[u].halfedge;
+        int guard = 0;
+
+        while (current_v != v && guard++ < 100000)
+        {
+            int found_he = -1;
+            int start_he = cur_he;
+            do
+            {
+                int next_he = mesh_halfedges_[cur_he].next;
+                int dest_v = mesh_halfedges_[next_he].origin;
+                int opp_he = mesh_halfedges_[next_he].next;
+                int opp_v = mesh_halfedges_[opp_he].origin;
+
+                if (segment_intersects_(Pu, Pv, mesh_vertices_[dest_v].p, mesh_vertices_[opp_v].p))
+                {
+                    found_he = next_he;
+                    break;
+                }
+
+                int tw = mesh_halfedges_[cur_he].twin;
+                if (tw < 0) break;
+                cur_he = mesh_halfedges_[tw].next;
+            } while (cur_he != start_he && cur_he >= 0);
+
+            if (found_he < 0) break;
+
+            crossed_edges.push_back(found_he);
+            int tw = mesh_halfedges_[found_he].twin;
+            if (tw < 0) break;
+            cur_he = tw;
+            current_v = mesh_halfedges_[cur_he].origin;
+        }
+
+        if (crossed_edges.empty())
+        {
+            std::vector<int> candidate_flips;
+            for (size_t i = 0; i < mesh_halfedges_.size(); ++i)
+            {
+                int a = mesh_halfedges_[i].origin;
+                int b = mesh_halfedges_[mesh_halfedges_[i].next].origin;
+                if (segment_intersects_(Pu, Pv, mesh_vertices_[a].p, mesh_vertices_[b].p))
+                {
+                    candidate_flips.push_back(static_cast<int>(i));
+                }
+            }
+
+            for (int h : candidate_flips)
+            {
+                flip_edge_(h);
+                existing_he = find_halfedge_(u, v);
+                if (existing_he >= 0)
+                {
+                    mesh_halfedges_[existing_he].is_constrained = true;
+                    int tw = mesh_halfedges_[existing_he].twin;
+                    if (tw >= 0) mesh_halfedges_[tw].is_constrained = true;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        std::vector<int> new_edges;
+        for (int h : crossed_edges)
+        {
+            if (flip_edge_(h))
+            {
+                new_edges.push_back(h);
+            }
+        }
+
+        existing_he = find_halfedge_(u, v);
+        if (existing_he >= 0)
+        {
+            mesh_halfedges_[existing_he].is_constrained = true;
+            int tw = mesh_halfedges_[existing_he].twin;
+            if (tw >= 0) mesh_halfedges_[tw].is_constrained = true;
+        }
+
+        for (int h : new_edges)
+        {
+            if (mesh_halfedges_[h].is_constrained) continue;
+            int tw = mesh_halfedges_[h].twin;
+            if (tw < 0) continue;
+
+            int a = mesh_halfedges_[h].origin;
+            int b = mesh_halfedges_[mesh_halfedges_[h].next].origin;
+            int c = mesh_halfedges_[mesh_halfedges_[mesh_halfedges_[h].next].next].origin;
+            int d = mesh_halfedges_[mesh_halfedges_[mesh_halfedges_[tw].next].next].origin;
+
+            if (robust::incircle(mesh_vertices_[a].p, mesh_vertices_[b].p, mesh_vertices_[c].p, mesh_vertices_[d].p) > 0)
+            {
+                flip_edge_(h);
+            }
+        }
+
+        return true;
+    }
+
+    size_t Triangulation::insert_constraints_batch(const qdt_edge* edges, size_t num_edges)
+    {
+        if (!edges || num_edges == 0) return 0;
+        ensure_mesh_();
+
+        size_t count = 0;
+        for (size_t i = 0; i < num_edges; ++i)
+        {
+            if (insert_constraint(edges[i].v0, edges[i].v1))
+            {
+                ++count;
+            }
+        }
+        return count;
     }
 
     Triangulation delaunay_triangulate(Point* pts, size_t sz)

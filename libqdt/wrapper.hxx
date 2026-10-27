@@ -3,6 +3,8 @@
 
 #include <array>
 #include <vector>
+#include <unordered_set>
+#include "qdt.h"
 
 namespace wrapper
 {
@@ -17,6 +19,10 @@ namespace wrapper
         void insert(const qdt_vec2d& p);
         void insert_parallel(const qdt_vec2d& p);
 
+        bool insert_constraint(size_t orig_v0, size_t orig_v1);
+
+        size_t insert_constraints_batch(const qdt_edge* edges, size_t num_edges);
+
         void ensure_mesh_();
         void ensure_mesh_parallel_();
 
@@ -30,10 +36,11 @@ namespace wrapper
 
         struct MeshHalfEdge
         {
-            int origin;
-            int twin;
-            int next;
-            int triangle_idx;
+            int  origin;
+            int  twin;
+            int  next;
+            int  triangle_idx;
+            bool is_constrained = false;
         };
 
         bool                      mesh_built_ = false;
@@ -50,6 +57,12 @@ namespace wrapper
         void insert_by_rebuild_(const qdt_vec2d& p);
         size_t add_triangle_to_output_(size_t id0, size_t id1, size_t id2, int h0);
         void remove_triangle_by_index_(size_t idx);
+
+        int  find_halfedge_(int u_local, int v_local) const;
+        bool flip_edge_(int h);
+        bool segment_intersects_(const qdt_vec2d& a, const qdt_vec2d& b, const qdt_vec2d& c, const qdt_vec2d& d) const;
+        int  orig_to_local_vtx_(size_t orig_id) const;
+        void triangulate_polygon_(const std::vector<int>& poly, std::vector<int>& new_edges);
     };
 }
 

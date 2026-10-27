@@ -1,4 +1,3 @@
-
 #include "qdt.h"
 #include "wrapper.hxx"
 
@@ -51,6 +50,22 @@ size_t qdt_insert_point_parallel(qdt_t* ptr, qdt_vec2d pt)
         return 0;
     Q->insert_parallel(pt);
     return Q->input_points.size();
+}
+
+size_t qdt_insert_constraint(qdt_t* ptr, size_t v0, size_t v1)
+{
+    auto Q = reinterpret_cast<wrapper::Triangulation*>(ptr);
+    if (!Q)
+        return 0;
+    return Q->insert_constraint(v0, v1) ? 1 : 0;
+}
+
+size_t qdt_insert_constraints_batch(qdt_t* ptr, const qdt_edge* edges, size_t num_edges)
+{
+    auto Q = reinterpret_cast<wrapper::Triangulation*>(ptr);
+    if (!Q)
+        return 0;
+    return Q->insert_constraints_batch(edges, num_edges);
 }
 
 size_t qdt_triangles_size(qdt_t* ptr)
