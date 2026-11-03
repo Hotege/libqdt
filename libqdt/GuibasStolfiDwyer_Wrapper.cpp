@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <deque>
 #include <memory>
 #include <numeric>
 #include <queue>
@@ -279,14 +280,50 @@ namespace wrapper
         constexpr double ERR_ORIENT = (3.0 + 16.0 * EPS) * EPS;
         constexpr double ERR_INCIRCLE = (10.0 + 96.0 * EPS) * EPS;
 
+        // The error bounds of the floating point filters, and the exact
+        // arithmetic below, assume that no intermediate product overflows or
+        // becomes subnormal. A filter result whose magnitude is below this
+        // floor is therefore not trusted, and the exact path is used instead.
+        constexpr double FILTER_FLOOR = 1e-250;
+
+        // The exact path first multiplies every coordinate by the same power of
+        // two, so that the largest one is about 1. That leaves the sign of the
+        // determinant unchanged (orient2d scales by a positive factor, incircle
+        // likewise), is exact, and keeps all products far from overflow and
+        // underflow, whatever the overall scale of the input. Coordinates whose
+        // magnitude is already moderate are left alone.
+        inline int normalizing_exponent(const double* v, int n)
+        {
+            double m = 0.0;
+            for (int i = 0; i < n; ++i)
+                m = std::max(m, std::fabs(v[i]));
+            if (m == 0.0 || !std::isfinite(m)) // all zero, or not a number: leave as is
+                return 0;
+            const int e = std::ilogb(m);
+            return (e >= -64 && e <= 64) ? 0 : e;
+        }
+
+        inline Point scaled_point(const Point& p, int e)
+        {
+            Point r;
+            r.x = std::ldexp(p.x, -e);
+            r.y = std::ldexp(p.y, -e);
+            return r;
+        }
+
 #if defined(_MSC_VER)
 #define ROBUST_NOINLINE __declspec(noinline)
 #else
 #define ROBUST_NOINLINE __attribute__((noinline))
 #endif
-        ROBUST_NOINLINE double orient2d_exact(const Point& a, const Point& b, const Point& c)
+        ROBUST_NOINLINE double orient2d_exact(const Point& a0, const Point& b0, const Point& c0)
         {
             using namespace exact;
+            const double raw[6] = { a0.x, a0.y, b0.x, b0.y, c0.x, c0.y };
+            const int e = normalizing_exponent(raw, 6);
+            const Point a = e ? scaled_point(a0, e) : a0;
+            const Point b = e ? scaled_point(b0, e) : b0;
+            const Point c = e ? scaled_point(c0, e) : c0;
             Exp acx, acy, bcx, bcy, m1, m2, s;
             diff(a.x, c.x, acx); diff(a.y, c.y, acy);
             diff(b.x, c.x, bcx); diff(b.y, c.y, bcy);
@@ -300,14 +337,21 @@ namespace wrapper
             const double detleft = (a.x - c.x) * (b.y - c.y);
             const double detright = (a.y - c.y) * (b.x - c.x);
             const double det = detleft - detright;
-            const double bound = ERR_ORIENT * (std::fabs(detleft) + std::fabs(detright));
-            if (det > bound || -det > bound)
+            const double mag = std::fabs(detleft) + std::fabs(detright);
+            const double bound = ERR_ORIENT * mag;
+            if ((det > bound || -det > bound) && mag > FILTER_FLOOR)
                 return det;
             return orient2d_exact(a, b, c);
         }
-        ROBUST_NOINLINE double incircle_exact(const Point& a, const Point& b, const Point& c, const Point& d)
+        ROBUST_NOINLINE double incircle_exact(const Point& a0, const Point& b0, const Point& c0, const Point& d0)
         {
             using namespace exact;
+            const double raw[8] = { a0.x, a0.y, b0.x, b0.y, c0.x, c0.y, d0.x, d0.y };
+            const int e = normalizing_exponent(raw, 8);
+            const Point a = e ? scaled_point(a0, e) : a0;
+            const Point b = e ? scaled_point(b0, e) : b0;
+            const Point c = e ? scaled_point(c0, e) : c0;
+            const Point d = e ? scaled_point(d0, e) : d0;
             Exp eadx, eady, ebdx, ebdy, ecdx, ecdy;
             diff(a.x, d.x, eadx); diff(a.y, d.y, eady);
             diff(b.x, d.x, ebdx); diff(b.y, d.y, ebdy);
@@ -344,7 +388,7 @@ namespace wrapper
                 (std::fabs(cdxady) + std::fabs(adxcdy)) * blift +
                 (std::fabs(adxbdy) + std::fabs(bdxady)) * clift;
             const double bound = ERR_INCIRCLE * permanent;
-            if (det > bound || -det > bound)
+            if ((det > bound || -det > bound) && permanent > FILTER_FLOOR)
                 return det;
             return incircle_exact(a, b, c, d);
         }
@@ -923,7 +967,13 @@ namespace wrapper
             if (h >= static_cast<int>(mesh_halfedges_.size())) return -1;
         }
 
-        for (int step = 0; step < 1000000; ++step)
+        // A walk that is not stuck visits every triangle at most once. A
+        // triangulation that is not Delaunay (constrained edges that were
+        // flipped into place) can make the plain visibility walk run in
+        // circles, so after this many steps the point is looked up by
+        // scanning instead.
+        const size_t max_steps = triangle_to_he_.size() + 16;
+        for (size_t step = 0; step < max_steps; ++step)
         {
             const int h0 = h;
             const int h1 = mesh_halfedges_[h0].next;
@@ -963,6 +1013,41 @@ namespace wrapper
             h = tw;
         }
 
+        return locate_scan_(p, hull_he);
+    }
+
+    // Finds the triangle that contains p (boundary included) by testing all of
+    // them. Returns a halfedge of that triangle. If p is outside the convex
+    // hull, returns -1 and sets hull_he to a hull halfedge that p can see.
+    int Triangulation::locate_scan_(const qdt_vec2d& p, int& hull_he)
+    {
+        hull_he = -1;
+        for (size_t t = 0; t < triangle_to_he_.size(); ++t)
+        {
+            const int h0 = triangle_to_he_[t];
+            const int h1 = mesh_halfedges_[h0].next;
+            const int h2 = mesh_halfedges_[h1].next;
+            const qdt_vec2d& A = mesh_vertices_[mesh_halfedges_[h0].origin].p;
+            const qdt_vec2d& B = mesh_vertices_[mesh_halfedges_[h1].origin].p;
+            const qdt_vec2d& C = mesh_vertices_[mesh_halfedges_[h2].origin].p;
+            if (robust::orient2d(A, B, p) >= 0 && robust::orient2d(B, C, p) >= 0 &&
+                robust::orient2d(C, A, p) >= 0)
+            {
+                last_face_he_ = h0;
+                return h0;
+            }
+        }
+        for (size_t h = 0; h < mesh_halfedges_.size(); ++h)
+        {
+            const MeshHalfEdge& e = mesh_halfedges_[h];
+            if (e.origin < 0 || e.twin >= 0) continue;
+            if (robust::orient2d(mesh_vertices_[e.origin].p,
+                mesh_vertices_[mesh_halfedges_[e.next].origin].p, p) < 0)
+            {
+                hull_he = static_cast<int>(h);
+                return -1;
+            }
+        }
         return -1;
     }
 
@@ -1062,57 +1147,49 @@ namespace wrapper
                 visible_hull.push_back(e);
         }
 
+        // The cavity is only the triangle that contains p, plus the triangle on
+        // the other side of the edge p lies on (if any), so that edge is split
+        // and no degenerate triangle appears. Growing the cavity with
+        // circumcircle tests alone would also swallow constrained edges inside
+        // the grown region and delete them. Delaunay is restored afterwards by
+        // edge flips (see the end of this function), which never flip a
+        // constrained edge, so constraints survive.
+        // If p is outside the hull nothing is removed: p is joined to the
+        // visible hull edges and the flips take care of the rest.
         std::vector<int>  cavity_hes;
         std::vector<bool> visited_tri(triangles.size(), false);
-        std::queue<int>   q;
+        int split_a = -1, split_b = -1; // endpoints of the constrained edge p splits
+
         if (!outside)
-            q.push(h_start);
-        else
-            for (int e : visible_hull)
-                q.push(e);
-
-        while (!q.empty())
         {
-            const int h = q.front(); q.pop();
-            const int tri_idx = mesh_halfedges_[h].triangle_idx;
+            auto add_to_cavity = [&](int h) {
+                const int t = mesh_halfedges_[h].triangle_idx;
+                if (t >= 0 && !visited_tri[t])
+                {
+                    visited_tri[t] = true;
+                    cavity_hes.push_back(h);
+                }
+                };
 
-            if (tri_idx < 0 || visited_tri[tri_idx])
-                continue;
-
-            const int h1 = mesh_halfedges_[h].next;
-            const int h2 = mesh_halfedges_[h1].next;
-            const int v0 = mesh_halfedges_[h].origin;
-            const int v1 = mesh_halfedges_[h1].origin;
-            const int v2 = mesh_halfedges_[h2].origin;
-
-            const double ic = robust::incircle(
-                mesh_vertices_[v0].p,
-                mesh_vertices_[v1].p,
-                mesh_vertices_[v2].p,
-                p);
-
-            if (ic <= 0) continue;
-
-            visited_tri[tri_idx] = true;
-            cavity_hes.push_back(h);
-
-            int e = h;
+            add_to_cavity(h_start);
+            int e = h_start;
             do
             {
-                const int tw = mesh_halfedges_[e].twin;
-                if (tw >= 0) q.push(tw);
-                e = mesh_halfedges_[e].next;
-            } while (e != h);
-        }
-
-        if (!outside && cavity_hes.empty())
-        {
-            const int tri_idx = mesh_halfedges_[h_start].triangle_idx;
-            if (tri_idx >= 0 && !visited_tri[tri_idx])
-            {
-                visited_tri[tri_idx] = true;
-                cavity_hes.push_back(h_start);
-            }
+                const int e_next = mesh_halfedges_[e].next;
+                if (robust::orient2d(mesh_vertices_[mesh_halfedges_[e].origin].p,
+                    mesh_vertices_[mesh_halfedges_[e_next].origin].p, p) == 0)
+                {
+                    // p lies on this edge, so the triangle across it is split too.
+                    const int tw = mesh_halfedges_[e].twin;
+                    if (tw >= 0) add_to_cavity(tw);
+                    if (mesh_halfedges_[e].is_constrained)
+                    {
+                        split_a = mesh_halfedges_[e].origin;
+                        split_b = mesh_halfedges_[e_next].origin;
+                    }
+                }
+                e = e_next;
+            } while (e != h_start);
         }
 
         struct BoundaryInfo { int a, b, external_twin; bool is_constrained; };
@@ -1241,6 +1318,73 @@ namespace wrapper
 
         mesh_vertices_[new_v].halfedge = new_tris[0].h2;
         last_face_he_ = new_tris[0].h0;
+
+        // The removed triangles' halfedges were freed and their slots reused
+        // above, so the stored halfedge of every cavity vertex may be stale.
+        // h0 starts at boundary_info[i].a and h1 at boundary_info[i].b.
+        for (size_t i = 0; i < new_tris.size(); ++i)
+        {
+            mesh_vertices_[boundary_info[i].a].halfedge = new_tris[i].h0;
+            mesh_vertices_[boundary_info[i].b].halfedge = new_tris[i].h1;
+        }
+
+        // p split a constrained edge (split_a, split_b): both halves stay
+        // constrained. new_tris[i] was built from boundary_info[i]; its h1
+        // runs b -> p and its h2 runs p -> a.
+        if (split_a >= 0)
+        {
+            auto mark_constrained = [&](int h) {
+                mesh_halfedges_[h].is_constrained = true;
+                const int tw = mesh_halfedges_[h].twin;
+                if (tw >= 0) mesh_halfedges_[tw].is_constrained = true;
+                };
+            for (size_t i = 0; i < new_tris.size(); ++i)
+            {
+                if (boundary_info[i].b == split_a || boundary_info[i].b == split_b)
+                    mark_constrained(new_tris[i].h1);
+                if (boundary_info[i].a == split_a || boundary_info[i].a == split_b)
+                    mark_constrained(new_tris[i].h2);
+            }
+        }
+
+        // Restore the (constrained) Delaunay property around p with edge
+        // flips. h0 of every new triangle is the edge opposite p; flipping it
+        // puts a diagonal through p, and the two edges that then face p are
+        // checked in turn. Constrained edges are never flipped.
+        std::vector<int> pending;
+        for (const auto& nt : new_tris)
+            pending.push_back(nt.h0);
+        while (!pending.empty())
+        {
+            const int h = pending.back();
+            pending.pop_back();
+
+            const int tw = mesh_halfedges_[h].twin;
+            if (tw < 0 || mesh_halfedges_[h].is_constrained)
+                continue;
+
+            const int h_next = mesh_halfedges_[h].next;
+            const int h_prev = mesh_halfedges_[h_next].next;
+            if (mesh_halfedges_[h_prev].origin != new_v)
+                continue; // h's triangle no longer has p as its apex
+
+            const int tw_next = mesh_halfedges_[tw].next;
+            const int tw_prev = mesh_halfedges_[tw_next].next;
+
+            const int a = mesh_halfedges_[h].origin;
+            const int b = mesh_halfedges_[h_next].origin;
+            const int d = mesh_halfedges_[tw_prev].origin;
+
+            if (robust::incircle(mesh_vertices_[a].p, mesh_vertices_[b].p,
+                mesh_vertices_[new_v].p, mesh_vertices_[d].p) <= 0)
+                continue;
+
+            if (flip_edge_(h))
+            {
+                pending.push_back(tw_next); // a -> d
+                pending.push_back(tw_prev); // d -> b
+            }
+        }
     }
 
     int Triangulation::orig_to_local_vtx_(size_t orig_id) const
@@ -1253,28 +1397,59 @@ namespace wrapper
         return -1;
     }
 
+    // Calls f(h) for every halfedge h that starts at vertex x, until f returns
+    // true. Works for interior and for convex hull vertices (whose fan is open
+    // on the outer side), independent of which halfedge is stored for x.
+    template <class F>
+    void Triangulation::for_each_out_(int x, F&& f) const
+    {
+        const int h0 = mesh_vertices_[x].halfedge;
+        if (h0 < 0) return;
+        const size_t limit = mesh_halfedges_.size();
+        size_t steps = 0;
+
+        // Counter-clockwise from h0: the next halfedge out of x is the twin of
+        // the previous halfedge of the same triangle.
+        int h = h0;
+        for (;;)
+        {
+            if (f(h)) return;
+            if (++steps > limit) return;
+            const int prev = mesh_halfedges_[mesh_halfedges_[h].next].next;
+            const int tw = mesh_halfedges_[prev].twin;
+            if (tw < 0) break;      // reached the hull boundary
+            if (tw == h0) return;   // went all the way around
+            h = tw;
+        }
+
+        // Clockwise from h0 (only reached for a hull vertex).
+        h = h0;
+        for (;;)
+        {
+            const int tw = mesh_halfedges_[h].twin;
+            if (tw < 0) return;
+            h = mesh_halfedges_[tw].next;
+            if (h == h0) return;
+            if (f(h)) return;
+            if (++steps > limit) return;
+        }
+    }
+
+    // The halfedge that goes from u to v, or -1. A convex hull edge has a
+    // halfedge in one direction only, so callers that accept either direction
+    // look for (u, v) and then for (v, u).
     int Triangulation::find_halfedge_(int u_local, int v_local) const
     {
-        int start = mesh_vertices_[u_local].halfedge;
-        if (start < 0) return -1;
-        int cur = start;
-        do {
-            int dest = mesh_halfedges_[mesh_halfedges_[cur].next].origin;
-            if (dest == v_local) return cur;
-            int tw = mesh_halfedges_[cur].twin;
-            if (tw < 0) break;
-            cur = mesh_halfedges_[tw].next;
-        } while (cur != start && cur >= 0);
-
-        for (size_t i = 0; i < mesh_halfedges_.size(); ++i)
-        {
-            if (mesh_halfedges_[i].origin == u_local)
+        int found = -1;
+        for_each_out_(u_local, [&](int h) -> bool {
+            if (mesh_halfedges_[mesh_halfedges_[h].next].origin == v_local)
             {
-                int dest = mesh_halfedges_[mesh_halfedges_[i].next].origin;
-                if (dest == v_local) return static_cast<int>(i);
+                found = h;
+                return true;
             }
-        }
-        return -1;
+            return false;
+            });
+        return found;
     }
 
     bool Triangulation::flip_edge_(int h)
@@ -1289,42 +1464,58 @@ namespace wrapper
         int tw_next = mesh_halfedges_[tw].next;
         int tw_prev = mesh_halfedges_[tw_next].next;
 
-        int a = mesh_halfedges_[h].origin;
-        int b = mesh_halfedges_[h_next].origin;
-        int c = mesh_halfedges_[tw].origin;
-        int d = mesh_halfedges_[tw_next].origin;
+        // Before the flip (both triangles counter-clockwise):
+        //   triangle 1:  h : a->b,  h_next : b->c,  h_prev : c->a
+        //   triangle 2:  tw: b->a,  tw_next: a->d,  tw_prev: d->b
+        // so c is the apex of triangle 1 and d is the apex of triangle 2.
+        // (tw originates at b and tw_next originates at a, so neither can be
+        // used for c or d.)
+        const int a = mesh_halfedges_[h].origin;
+        const int b = mesh_halfedges_[h_next].origin;
+        const int c = mesh_halfedges_[h_prev].origin;
+        const int d = mesh_halfedges_[tw_prev].origin;
 
-        if (robust::orient2d(mesh_vertices_[a].p, mesh_vertices_[b].p, mesh_vertices_[d].p) <= 0 ||
+        // After the flip the diagonal is c-d and the triangles are (d,c,a) and
+        // (c,d,b). The flip is only valid when both stay strictly
+        // counter-clockwise, i.e. the quadrilateral a,d,b,c is strictly convex.
+        if (robust::orient2d(mesh_vertices_[d].p, mesh_vertices_[c].p, mesh_vertices_[a].p) <= 0 ||
             robust::orient2d(mesh_vertices_[c].p, mesh_vertices_[d].p, mesh_vertices_[b].p) <= 0)
         {
             return false;
         }
 
+        // triangle 1 becomes  h : d->c,  h_prev : c->a,  tw_next : a->d
         mesh_halfedges_[h].origin = d;
         mesh_halfedges_[h].next = h_prev;
         mesh_halfedges_[h_prev].next = tw_next;
         mesh_halfedges_[tw_next].next = h;
 
-        mesh_halfedges_[tw].origin = b;
+        // triangle 2 becomes  tw : c->d,  tw_prev : d->b,  h_next : b->c
+        mesh_halfedges_[tw].origin = c;
         mesh_halfedges_[tw].next = tw_prev;
         mesh_halfedges_[tw_prev].next = h_next;
         mesh_halfedges_[h_next].next = tw;
 
-        int tri1 = mesh_halfedges_[h].triangle_idx;
-        int tri2 = mesh_halfedges_[tw].triangle_idx;
+        const int tri1 = mesh_halfedges_[h].triangle_idx;
+        const int tri2 = mesh_halfedges_[tw].triangle_idx;
 
-        mesh_halfedges_[h_prev].triangle_idx = tri1;
+        // h and h_prev stay in triangle 1, tw and tw_prev stay in triangle 2;
+        // tw_next moves to triangle 1 and h_next moves to triangle 2.
         mesh_halfedges_[tw_next].triangle_idx = tri1;
-
-        mesh_halfedges_[tw_prev].triangle_idx = tri2;
         mesh_halfedges_[h_next].triangle_idx = tri2;
 
-        triangles[tri1] = { mesh_vertices_[d].orig_id, mesh_vertices_[c].orig_id, mesh_vertices_[b].orig_id };
-        triangles[tri2] = { mesh_vertices_[b].orig_id, mesh_vertices_[a].orig_id, mesh_vertices_[d].orig_id };
+        triangles[tri1] = { mesh_vertices_[d].orig_id, mesh_vertices_[c].orig_id, mesh_vertices_[a].orig_id };
+        triangles[tri2] = { mesh_vertices_[c].orig_id, mesh_vertices_[d].orig_id, mesh_vertices_[b].orig_id };
 
+        // remove_triangle_by_index_ walks the cycle starting at
+        // triangle_to_he_[i], so the representative must lie in triangle i.
+        triangle_to_he_[tri1] = h;
+        triangle_to_he_[tri2] = tw;
+
+        // A vertex's stored halfedge must start at that vertex.
         mesh_vertices_[a].halfedge = tw_next;
+        mesh_vertices_[b].halfedge = h_next;
         mesh_vertices_[c].halfedge = h_prev;
-        mesh_vertices_[b].halfedge = tw;
         mesh_vertices_[d].halfedge = h;
 
         return true;
@@ -1341,183 +1532,235 @@ namespace wrapper
             ((o3 > 0 && o4 < 0) || (o3 < 0 && o4 > 0));
     }
 
-    void Triangulation::triangulate_polygon_(const std::vector<int>& poly, std::vector<int>& new_edges)
+    void Triangulation::mark_constrained_(int h)
     {
-        if (poly.size() < 3) return;
-        if (poly.size() == 3) return;
+        mesh_halfedges_[h].is_constrained = true;
+        const int tw = mesh_halfedges_[h].twin;
+        if (tw >= 0) mesh_halfedges_[tw].is_constrained = true;
+    }
 
-        int n = static_cast<int>(poly.size());
-        int best_split = -1;
+    // Do the vectors a->b and a->c point the same way? Only meaningful when
+    // they are known to be collinear. Compares the signs of the coordinate
+    // differences, so it cannot underflow.
+    static bool same_direction_(const qdt_vec2d& a, const qdt_vec2d& b, const qdt_vec2d& c)
+    {
+        auto sg = [](double d) { return d > 0 ? 1 : (d < 0 ? -1 : 0); };
+        const int sx = sg(b.x - a.x) * sg(c.x - a.x);
+        const int sy = sg(b.y - a.y) * sg(c.y - a.y);
+        return sx >= 0 && sy >= 0 && (sx > 0 || sy > 0);
+    }
 
-        for (int i = 0; i < n; ++i)
-        {
-            int j = (i + 2) % n;
-            if (i == 0 && j == n - 1) continue;
+    // Walks from u to v and lists, in order, the edges the open segment uv
+    // crosses. Each is returned as the halfedge that runs from the vertex on
+    // the right of u->v to the vertex on its left. Nothing is modified.
+    //
+    // Returns false (and the list is meaningless) when the segment cannot
+    // become an edge as it is: it crosses a constrained edge, or it passes
+    // exactly through another vertex.
+    bool Triangulation::trace_segment_(int u, int v, std::vector<int>& crossed) const
+    {
+        auto he_next = [&](int h) { return mesh_halfedges_[h].next; };
+        auto org = [&](int h) { return mesh_halfedges_[h].origin; };
+        auto pt = [&](int x) -> const qdt_vec2d& { return mesh_vertices_[x].p; };
+        const qdt_vec2d& U = pt(u);
+        const qdt_vec2d& V = pt(v);
 
-            int u = poly[i];
-            int v = poly[j];
-
-            bool valid = true;
-            for (int k = 0; k < n; ++k)
+        // Among the triangles around u, find the one the segment leaves u
+        // through: v is strictly between its edges u->y and u->z. If v lies
+        // exactly on one of those edges, that edge's other end is a vertex on
+        // the segment.
+        int start = -1; // y -> z, the edge opposite u in that triangle
+        bool blocked = false;
+        for_each_out_(u, [&](int h) -> bool {
+            const int hn = he_next(h);
+            const int y = org(hn);
+            const int z = org(he_next(hn));
+            const double oy = robust::orient2d(U, pt(y), V);
+            const double oz = robust::orient2d(U, pt(z), V);
+            if (oy > 0 && oz < 0)
             {
-                int p1 = poly[k];
-                int p2 = poly[(k + 1) % n];
-                if (p1 == u || p1 == v || p2 == u || p2 == v) continue;
-                if (segment_intersects_(mesh_vertices_[u].p, mesh_vertices_[v].p, mesh_vertices_[p1].p, mesh_vertices_[p2].p))
+                start = hn;
+                return true;
+            }
+            if ((oy == 0 && same_direction_(U, pt(y), V)) ||
+                (oz == 0 && same_direction_(U, pt(z), V)))
+            {
+                blocked = true;
+                return true;
+            }
+            return false;
+            });
+        if (blocked || start < 0) return false;
+
+        // In the first triangle y lies on the right of u->v and z on its left.
+        // Every crossed edge keeps that orientation (right vertex -> left vertex).
+        int c = start;
+        for (size_t guard = 0; guard <= triangles.size(); ++guard)
+        {
+            if (mesh_halfedges_[c].is_constrained) return false;
+            crossed.push_back(c);
+
+            const int tw = mesh_halfedges_[c].twin; // z -> y in the next triangle
+            if (tw < 0) return false;               // would leave the convex hull
+            const int a = he_next(tw);              // y -> w
+            const int b = he_next(a);               // w -> z
+            const int w = org(b);
+            if (w == v) return true;
+
+            const double o = robust::orient2d(U, V, pt(w));
+            if (o == 0) return false;               // w lies on the segment
+            c = (o > 0) ? a : b;                    // w on the left: leave via y->w
+        }
+        return false;
+    }
+
+    // Lawson's flip algorithm: every edge on the stack that is not
+    // constrained and not locally Delaunay is flipped, and the four edges
+    // around the flipped one are examined in turn.
+    void Triangulation::legalize_(std::vector<int>& stack)
+    {
+        while (!stack.empty())
+        {
+            const int h = stack.back();
+            stack.pop_back();
+
+            if (mesh_halfedges_[h].origin < 0) continue;
+            const int tw = mesh_halfedges_[h].twin;
+            if (tw < 0 || mesh_halfedges_[h].is_constrained) continue;
+
+            const int h_next = mesh_halfedges_[h].next;
+            const int h_prev = mesh_halfedges_[h_next].next;
+            const int tw_next = mesh_halfedges_[tw].next;
+            const int tw_prev = mesh_halfedges_[tw_next].next;
+
+            const int a = mesh_halfedges_[h].origin;
+            const int b = mesh_halfedges_[h_next].origin;
+            const int c = mesh_halfedges_[h_prev].origin;
+            const int d = mesh_halfedges_[tw_prev].origin;
+
+            if (robust::incircle(mesh_vertices_[a].p, mesh_vertices_[b].p,
+                mesh_vertices_[c].p, mesh_vertices_[d].p) <= 0)
+                continue;
+            if (!flip_edge_(h)) continue;
+
+            stack.push_back(h_prev);
+            stack.push_back(h_next);
+            stack.push_back(tw_next);
+            stack.push_back(tw_prev);
+        }
+    }
+
+    // Inserts the constraint between two mesh vertices (local indices).
+    //  - If the edge exists it just becomes constrained.
+    //  - Otherwise the edges the segment crosses are flipped away (Sloan 1993:
+    //    a crossed edge whose quadrilateral is strictly convex is flipped; if
+    //    the new diagonal still crosses the segment it goes back in the queue),
+    //    which always ends with the edge u-v in place, and then the
+    //    constrained Delaunay property is restored with Lawson flips.
+    //  - If the segment crosses a constrained edge or passes through another
+    //    vertex it cannot be an edge: nothing is changed and false is returned.
+    bool Triangulation::insert_constraint_local_(int u, int v)
+    {
+        int e = find_halfedge_(u, v);
+        if (e < 0) e = find_halfedge_(v, u);
+        if (e >= 0)
+        {
+            mark_constrained_(e);
+            return true;
+        }
+
+        std::vector<int> crossed;
+        if (!trace_segment_(u, v, crossed)) return false;
+
+        const qdt_vec2d& U = mesh_vertices_[u].p;
+        const qdt_vec2d& V = mesh_vertices_[v].p;
+
+        std::deque<int> queue(crossed.begin(), crossed.end());
+        std::vector<int> new_edges;
+        size_t stalled = 0;
+        while (!queue.empty())
+        {
+            const int h = queue.front();
+            queue.pop_front();
+            if (flip_edge_(h))
+            {
+                stalled = 0;
+                const int c = mesh_halfedges_[h].origin;
+                const int d = mesh_halfedges_[mesh_halfedges_[h].next].origin;
+                if (segment_intersects_(U, V, mesh_vertices_[c].p, mesh_vertices_[d].p))
+                    queue.push_back(h);
+                else
+                    new_edges.push_back(h);
+            }
+            else
+            {
+                queue.push_back(h);
+                // A whole round without a single flip. With no vertex on the
+                // segment this cannot happen; stop instead of looping.
+                if (++stalled >= queue.size()) break;
+            }
+        }
+
+        bool ok = false;
+        if (queue.empty())
+        {
+            e = -1;
+            for (int h : new_edges)
+            {
+                const int a = mesh_halfedges_[h].origin;
+                const int b = mesh_halfedges_[mesh_halfedges_[h].next].origin;
+                if ((a == u && b == v) || (a == v && b == u))
                 {
-                    valid = false;
+                    e = h;
                     break;
                 }
             }
-
-            if (valid)
+            if (e < 0) e = find_halfedge_(u, v);
+            if (e < 0) e = find_halfedge_(v, u);
+            if (e >= 0)
             {
-                best_split = i;
-                break;
+                mark_constrained_(e);
+                ok = true;
             }
         }
 
-        if (best_split != -1)
-        {
-            int i = best_split;
-            int j = (i + 2) % n;
-
-            std::vector<int> poly1, poly2;
-            for (int k = i; k != j; k = (k + 1) % n) poly1.push_back(poly[k]);
-            poly1.push_back(poly[j]);
-
-            for (int k = j; k != i; k = (k + 1) % n) poly2.push_back(poly[k]);
-            poly2.push_back(poly[i]);
-
-            triangulate_polygon_(poly1, new_edges);
-            triangulate_polygon_(poly2, new_edges);
-        }
+        // Restore the Delaunay property around everything that changed. The
+        // constrained edge u-v is already marked, so it is never flipped.
+        std::vector<int> stack;
+        auto push_around = [&](int h) {
+            if (mesh_halfedges_[h].origin < 0) return;
+            const int n = mesh_halfedges_[h].next;
+            stack.push_back(h);
+            stack.push_back(n);
+            stack.push_back(mesh_halfedges_[n].next);
+            const int tw = mesh_halfedges_[h].twin;
+            if (tw >= 0)
+            {
+                const int tn = mesh_halfedges_[tw].next;
+                stack.push_back(tn);
+                stack.push_back(mesh_halfedges_[tn].next);
+            }
+            };
+        for (int h : new_edges) push_around(h);
+        for (int h : queue) push_around(h);
+        legalize_(stack);
+        return ok;
     }
 
     bool Triangulation::insert_constraint(size_t orig_v0, size_t orig_v1)
     {
-        if (orig_v0 == orig_v1) return false;
-        ensure_mesh_();
-
+        // Indices come from the caller: reject anything that is not a point of
+        // this context (this also covers a context that was never filled).
+        if (orig_v0 >= rep.size() || orig_v1 >= rep.size()) return false;
         orig_v0 = rep[orig_v0];
         orig_v1 = rep[orig_v1];
+        if (orig_v0 == orig_v1) return false;
 
-        int u = orig_to_local_vtx_(orig_v0);
-        int v = orig_to_local_vtx_(orig_v1);
-
+        ensure_mesh_();
+        const int u = orig_to_local_vtx_(orig_v0);
+        const int v = orig_to_local_vtx_(orig_v1);
         if (u < 0 || v < 0) return false;
-
-        int existing_he = find_halfedge_(u, v);
-        if (existing_he >= 0)
-        {
-            mesh_halfedges_[existing_he].is_constrained = true;
-            int tw = mesh_halfedges_[existing_he].twin;
-            if (tw >= 0) mesh_halfedges_[tw].is_constrained = true;
-            return true;
-        }
-
-        const qdt_vec2d& Pu = mesh_vertices_[u].p;
-        const qdt_vec2d& Pv = mesh_vertices_[v].p;
-
-        std::vector<int> crossed_edges;
-        int current_v = u;
-        int cur_he = mesh_vertices_[u].halfedge;
-        int guard = 0;
-
-        while (current_v != v && guard++ < 100000)
-        {
-            int found_he = -1;
-            int start_he = cur_he;
-            do
-            {
-                int next_he = mesh_halfedges_[cur_he].next;
-                int dest_v = mesh_halfedges_[next_he].origin;
-                int opp_he = mesh_halfedges_[next_he].next;
-                int opp_v = mesh_halfedges_[opp_he].origin;
-
-                if (segment_intersects_(Pu, Pv, mesh_vertices_[dest_v].p, mesh_vertices_[opp_v].p))
-                {
-                    found_he = next_he;
-                    break;
-                }
-
-                int tw = mesh_halfedges_[cur_he].twin;
-                if (tw < 0) break;
-                cur_he = mesh_halfedges_[tw].next;
-            } while (cur_he != start_he && cur_he >= 0);
-
-            if (found_he < 0) break;
-
-            crossed_edges.push_back(found_he);
-            int tw = mesh_halfedges_[found_he].twin;
-            if (tw < 0) break;
-            cur_he = tw;
-            current_v = mesh_halfedges_[cur_he].origin;
-        }
-
-        if (crossed_edges.empty())
-        {
-            std::vector<int> candidate_flips;
-            for (size_t i = 0; i < mesh_halfedges_.size(); ++i)
-            {
-                int a = mesh_halfedges_[i].origin;
-                int b = mesh_halfedges_[mesh_halfedges_[i].next].origin;
-                if (segment_intersects_(Pu, Pv, mesh_vertices_[a].p, mesh_vertices_[b].p))
-                {
-                    candidate_flips.push_back(static_cast<int>(i));
-                }
-            }
-
-            for (int h : candidate_flips)
-            {
-                flip_edge_(h);
-                existing_he = find_halfedge_(u, v);
-                if (existing_he >= 0)
-                {
-                    mesh_halfedges_[existing_he].is_constrained = true;
-                    int tw = mesh_halfedges_[existing_he].twin;
-                    if (tw >= 0) mesh_halfedges_[tw].is_constrained = true;
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        std::vector<int> new_edges;
-        for (int h : crossed_edges)
-        {
-            if (flip_edge_(h))
-            {
-                new_edges.push_back(h);
-            }
-        }
-
-        existing_he = find_halfedge_(u, v);
-        if (existing_he >= 0)
-        {
-            mesh_halfedges_[existing_he].is_constrained = true;
-            int tw = mesh_halfedges_[existing_he].twin;
-            if (tw >= 0) mesh_halfedges_[tw].is_constrained = true;
-        }
-
-        for (int h : new_edges)
-        {
-            if (mesh_halfedges_[h].is_constrained) continue;
-            int tw = mesh_halfedges_[h].twin;
-            if (tw < 0) continue;
-
-            int a = mesh_halfedges_[h].origin;
-            int b = mesh_halfedges_[mesh_halfedges_[h].next].origin;
-            int c = mesh_halfedges_[mesh_halfedges_[mesh_halfedges_[h].next].next].origin;
-            int d = mesh_halfedges_[mesh_halfedges_[mesh_halfedges_[tw].next].next].origin;
-
-            if (robust::incircle(mesh_vertices_[a].p, mesh_vertices_[b].p, mesh_vertices_[c].p, mesh_vertices_[d].p) > 0)
-            {
-                flip_edge_(h);
-            }
-        }
-
-        return true;
+        return insert_constraint_local_(u, v);
     }
 
     size_t Triangulation::insert_constraints_batch(const qdt_edge* edges, size_t num_edges)
@@ -1525,13 +1768,29 @@ namespace wrapper
         if (!edges || num_edges == 0) return 0;
         ensure_mesh_();
 
+        // Constraints never add vertices, so one index table serves the whole
+        // batch instead of one linear search per endpoint.
+        std::vector<int> to_local(input_points.size(), -1);
+        for (size_t i = 0; i < mesh_vertices_.size(); ++i)
+        {
+            if (mesh_vertices_[i].orig_id < to_local.size())
+                to_local[mesh_vertices_[i].orig_id] = static_cast<int>(i);
+        }
+
         size_t count = 0;
         for (size_t i = 0; i < num_edges; ++i)
         {
-            if (insert_constraint(edges[i].v0, edges[i].v1))
-            {
+            size_t a = edges[i].v0;
+            size_t b = edges[i].v1;
+            if (a >= rep.size() || b >= rep.size()) continue;
+            a = rep[a];
+            b = rep[b];
+            if (a == b || a >= to_local.size() || b >= to_local.size()) continue;
+            const int u = to_local[a];
+            const int v = to_local[b];
+            if (u < 0 || v < 0) continue;
+            if (insert_constraint_local_(u, v))
                 ++count;
-            }
         }
         return count;
     }

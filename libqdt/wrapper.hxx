@@ -54,15 +54,21 @@ namespace wrapper
         int  alloc_halfedge_();
         void free_halfedge_(int h);
         int  locate_(const qdt_vec2d& p, int& hull_he);
+        int  locate_scan_(const qdt_vec2d& p, int& hull_he);
         void insert_by_rebuild_(const qdt_vec2d& p);
         size_t add_triangle_to_output_(size_t id0, size_t id1, size_t id2, int h0);
         void remove_triangle_by_index_(size_t idx);
 
+        template <class F>
+        void for_each_out_(int x_local, F&& f) const;
         int  find_halfedge_(int u_local, int v_local) const;
         bool flip_edge_(int h);
         bool segment_intersects_(const qdt_vec2d& a, const qdt_vec2d& b, const qdt_vec2d& c, const qdt_vec2d& d) const;
         int  orig_to_local_vtx_(size_t orig_id) const;
-        void triangulate_polygon_(const std::vector<int>& poly, std::vector<int>& new_edges);
+        void mark_constrained_(int h);
+        bool trace_segment_(int u_local, int v_local, std::vector<int>& crossed) const;
+        void legalize_(std::vector<int>& stack);
+        bool insert_constraint_local_(int u_local, int v_local);
     };
 }
 
