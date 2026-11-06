@@ -337,15 +337,51 @@ namespace parallel
         constexpr double ERR_ORIENT = (3.0 + 16.0 * EPS) * EPS;
         constexpr double ERR_INCIRCLE = (10.0 + 96.0 * EPS) * EPS;
 
+        // The error bounds of the floating point filters, and the exact
+        // arithmetic below, assume that no intermediate product overflows or
+        // becomes subnormal. A filter result whose magnitude is below this
+        // floor is therefore not trusted, and the exact path is used instead.
+        constexpr double FILTER_FLOOR = 1e-250;
+
+        // The exact path first multiplies every coordinate by the same power of
+        // two, so that the largest one is about 1. That leaves the sign of the
+        // determinant unchanged (orient2d scales by a positive factor, incircle
+        // likewise), is exact, and keeps all products far from overflow and
+        // underflow, whatever the overall scale of the input. Coordinates whose
+        // magnitude is already moderate are left alone.
+        inline int normalizing_exponent(const double* v, int n)
+        {
+            double m = 0.0;
+            for (int i = 0; i < n; ++i)
+                m = std::max(m, std::fabs(v[i]));
+            if (m == 0.0 || !std::isfinite(m)) // all zero, or not a number: leave as is
+                return 0;
+            const int e = std::ilogb(m);
+            return (e >= -64 && e <= 64) ? 0 : e;
+        }
+
+        inline Point scaled_point(const Point& p, int e)
+        {
+            Point r;
+            r.x = std::ldexp(p.x, -e);
+            r.y = std::ldexp(p.y, -e);
+            return r;
+        }
+
 #if defined(_MSC_VER)
 #define ROBUST_NOINLINE __declspec(noinline)
 #else
 #define ROBUST_NOINLINE __attribute__((noinline))
 #endif
 
-        ROBUST_NOINLINE double orient2d_exact(const Point& a, const Point& b, const Point& c)
+        ROBUST_NOINLINE double orient2d_exact(const Point& a0, const Point& b0, const Point& c0)
         {
             using namespace exact;
+            const double raw[6] = { a0.x, a0.y, b0.x, b0.y, c0.x, c0.y };
+            const int e = normalizing_exponent(raw, 6);
+            const Point a = e ? scaled_point(a0, e) : a0;
+            const Point b = e ? scaled_point(b0, e) : b0;
+            const Point c = e ? scaled_point(c0, e) : c0;
             Exp acx, acy, bcx, bcy, m1, m2, s;
             diff(a.x, c.x, acx); diff(a.y, c.y, acy);
             diff(b.x, c.x, bcx); diff(b.y, c.y, bcy);
@@ -360,14 +396,22 @@ namespace parallel
             const double detleft = (a.x - c.x) * (b.y - c.y);
             const double detright = (a.y - c.y) * (b.x - c.x);
             const double det = detleft - detright;
-            const double bound = ERR_ORIENT * (std::fabs(detleft) + std::fabs(detright));
-            if (det > bound || -det > bound) return det;
+            const double mag = std::fabs(detleft) + std::fabs(detright);
+            const double bound = ERR_ORIENT * mag;
+            if ((det > bound || -det > bound) && mag > FILTER_FLOOR)
+                return det;
             return orient2d_exact(a, b, c);
         }
 
-        ROBUST_NOINLINE double incircle_exact(const Point& a, const Point& b, const Point& c, const Point& d)
+        ROBUST_NOINLINE double incircle_exact(const Point& a0, const Point& b0, const Point& c0, const Point& d0)
         {
             using namespace exact;
+            const double raw[8] = { a0.x, a0.y, b0.x, b0.y, c0.x, c0.y, d0.x, d0.y };
+            const int e = normalizing_exponent(raw, 8);
+            const Point a = e ? scaled_point(a0, e) : a0;
+            const Point b = e ? scaled_point(b0, e) : b0;
+            const Point c = e ? scaled_point(c0, e) : c0;
+            const Point d = e ? scaled_point(d0, e) : d0;
             Exp eadx, eady, ebdx, ebdy, ecdx, ecdy;
             diff(a.x, d.x, eadx); diff(a.y, d.y, eady);
             diff(b.x, d.x, ebdx); diff(b.y, d.y, ebdy);
@@ -400,13 +444,13 @@ namespace parallel
             const double alift = adx * adx + ady * ady;
             const double blift = bdx * bdx + bdy * bdy;
             const double clift = cdx * cdx + cdy * cdy;
-            const double det = alift * (bdxcdy - cdxbdy) + blift * (cdxady - adxcdy) +
-                clift * (adxbdy - bdxady);
+            const double det = alift * (bdxcdy - cdxbdy) + blift * (cdxady - adxcdy) + clift * (adxbdy - bdxady);
             const double permanent = (std::fabs(bdxcdy) + std::fabs(cdxbdy)) * alift +
                 (std::fabs(cdxady) + std::fabs(adxcdy)) * blift +
                 (std::fabs(adxbdy) + std::fabs(bdxady)) * clift;
             const double bound = ERR_INCIRCLE * permanent;
-            if (det > bound || -det > bound) return det;
+            if ((det > bound || -det > bound) && permanent > FILTER_FLOOR)
+                return det;
             return incircle_exact(a, b, c, d);
         }
     }
