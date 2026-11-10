@@ -164,7 +164,7 @@ typedef std::chrono::steady_clock Clock;
 typedef std::vector<qdt_vec2d>    PointList;
 
 static const double kExtent = 1000.0;  /* points live in [0, kExtent)^2 */
-static const double kPi = 3.14159265358979323846;
+static const double kPi = M_PI;
 static const size_t kReadmeN = 2624409; /* point count of the old README benchmark */
 
 static double now_ms()

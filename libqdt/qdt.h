@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Hotege
+ * Copyright (c) 2026 QDT contributors
  * SPDX-License-Identifier: MIT
  *
  * This file is part of the QDT library.
