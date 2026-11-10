@@ -369,22 +369,6 @@ Triangle 5: 3, 2, 5
 The order of the triangles, and which vertex of each triangle comes first, may
 differ between versions and platforms.
 
-## Tests
-
-`test/qdt_test.cpp` checks every result with its own exact integer geometry
-code: triangle orientation and validity, the manifold property of the mesh,
-hull coverage and the Euler relation, the Delaunay property, and that every
-accepted constraint is an edge that no other edge crosses. It needs GCC or
-Clang (128-bit integers).
-
-```sh
-g++ -std=c++14 -O2 -pthread -Ilibqdt test/qdt_test.cpp libqdt.a -lm -o qdt_test
-./qdt_test
-```
-
-The exit code is 0 if every check passed. `--quick` skips the 250,000-point
-stress test.
-
 ## Performance
 
 The figures below were produced by `test/qdt_bench.cpp`. Timings are wall-clock milliseconds around the library calls only (point generation and the creation and destruction of contexts are not included); tables show medians. Absolute numbers depend on the CPU, compiler, compiler flags and thread count, so the relative comparisons are more useful than the absolute values.
