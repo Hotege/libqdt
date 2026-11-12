@@ -44,6 +44,11 @@ if(WIN32)
     endif()
 endif()
 
+# Add math macro for MSVC
+if(MSVC)
+    target_compile_definitions(qdt PUBLIC _USE_MATH_DEFINES)
+endif()
+
 # The robust geometric predicates depend on strict IEEE-754 floating-point
 # behavior. Do not compile this library with -ffast-math or /fp:fast.
 if(MSVC)
