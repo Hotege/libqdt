@@ -14,6 +14,8 @@
 #include <queue>
 #include <random>
 #include <set>
+#include <stdexcept>
+#include <system_error>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -28,30 +30,42 @@ namespace parallel
 
     thread_local int tls_slot = 0;
 
+    // Thrown when the parallel builder cannot continue (its pre-allocated edge
+    // storage is exhausted, or a thread slot is out of range). It never leaves
+    // this file: delaunay_triangulate() catches it and falls back to the serial
+    // implementation.
+    struct BuilderOverflow : std::runtime_error
+    {
+        explicit BuilderOverflow(const char* what) : std::runtime_error(what) {}
+    };
+
     class ThreadPool
     {
     public:
         explicit ThreadPool(size_t n) : stop_(false)
         {
             if (n == 0) n = 1;
-            for (size_t i = 0; i < n; ++i)
-                workers_.emplace_back([this, i] {
-                tls_slot = static_cast<int>(i) + 1;
-                worker_loop();
-                    });
+            try
+            {
+                for (size_t i = 0; i < n; ++i)
+                    workers_.emplace_back([this, i] {
+                    tls_slot = static_cast<int>(i) + 1;
+                    worker_loop();
+                        });
+            }
+            catch (...)
+            {
+                // The destructor does not run for a half-constructed object,
+                // and destroying a joinable std::thread terminates the process.
+                // Stop and join the workers that did start, then rethrow.
+                shutdown_();
+                throw;
+            }
         }
 
         size_t size() const { return workers_.size(); }
 
-        ~ThreadPool()
-        {
-            {
-                std::unique_lock<std::mutex> lock(mtx_);
-                stop_ = true;
-            }
-            cv_.notify_all();
-            for (auto& t : workers_) t.join();
-        }
+        ~ThreadPool() { shutdown_(); }
 
         template <class F>
         auto enqueue(F&& f) -> std::future<decltype(f())>
@@ -95,6 +109,19 @@ namespace parallel
         }
 
     private:
+        void shutdown_()
+        {
+            {
+                std::unique_lock<std::mutex> lock(mtx_);
+                stop_ = true;
+            }
+            cv_.notify_all();
+            for (auto& t : workers_)
+            {
+                if (t.joinable()) t.join();
+            }
+        }
+
         void worker_loop()
         {
             for (;;)
@@ -498,6 +525,12 @@ namespace parallel
                 }
             }
 
+            // The pool is attached after construction so that the caller can
+            // declare the builder before the pool: the pool (which joins its
+            // workers) is then destroyed first, and no task can touch a
+            // destroyed builder when an exception unwinds the caller.
+            void set_pool(ThreadPool* pool) { pool_ = pool; }
+
             void run()
             {
                 build(0, static_cast<int>(V.size()), 0, 0, true, 0);
@@ -543,10 +576,7 @@ namespace parallel
             {
                 const int slot = tls_slot;
                 if (slot < 0 || slot >= MAX_POOLS)
-                {
-                    std::fprintf(stderr, "Builder: thread slot %d >= MAX_POOLS\n", slot);
-                    std::abort();
-                }
+                    throw BuilderOverflow("QDT: thread slot out of range");
                 return pools_[slot];
             }
 
@@ -574,11 +604,7 @@ namespace parallel
                     {
                         const int s = g_next.fetch_add(CHUNK_SIZE, std::memory_order_acq_rel);
                         if (s + CHUNK_SIZE > static_cast<int>(qe.size()))
-                        {
-                            std::fprintf(stderr, "Builder: qe overflow (s=%d cap=%zu)\n",
-                                s, qe.size());
-                            std::abort();
-                        }
+                            throw BuilderOverflow("QDT: parallel edge storage exhausted");
                         for (int i = 0; i < CHUNK_SIZE; ++i)
                         {
                             qe[s + i].vtx[0] = -1;
@@ -845,7 +871,7 @@ namespace parallel
         };
     }
 
-    wrapper::Triangulation delaunay_triangulate(Point* pts, size_t sz)
+    wrapper::Triangulation delaunay_triangulate(const Point* pts, size_t sz)
     {
         const int n = static_cast<int>(sz);
 
@@ -893,10 +919,26 @@ namespace parallel
 
             if (nthreads > 1 && V.size() >= 200000)
             {
-                ThreadPool pool(nthreads);
-                detail::Builder b(V, &pool);
-                b.run();
-                b.extract(res.triangles);
+                bool fall_back = false;
+                try
+                {
+                    // The builder is declared before the pool on purpose: after
+                    // an exception, tasks that are still queued or running must
+                    // not outlive it (see Builder::set_pool).
+                    detail::Builder b(V, nullptr);
+                    ThreadPool pool(nthreads);
+                    b.set_pool(&pool);
+                    b.run();
+                    b.extract(res.triangles);
+                }
+                catch (const BuilderOverflow&) { fall_back = true; }
+                catch (const std::system_error&) { fall_back = true; } // could not start threads
+                if (fall_back)
+                {
+                    // V was reordered by the failed attempt; the serial
+                    // implementation starts again from the caller's points.
+                    return wrapper::delaunay_triangulate(pts, sz);
+                }
             }
             else
             {

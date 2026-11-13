@@ -119,14 +119,17 @@ typedef struct qdt_t qdt_t; /* Opaque triangulation context. */
 | Function | Description |
 | --- | --- |
 | `qdt_t* qdt_create(void)` | Creates a new, empty triangulation context. See [Error handling](#error-handling). |
-| `void qdt_execute(qdt_t* ptr, qdt_vec2d* pts, size_t n)` | Computes the Delaunay triangulation of `n` points in one batch. Replaces everything previously stored in the context, including inserted points and constraints. The points are copied; `pts` is not modified and need not stay valid after the call. |
-| `void qdt_execute_parallel(qdt_t* ptr, qdt_vec2d* pts, size_t n)` | Same as `qdt_execute`, but may use multiple threads. See [Parallel mode](#parallel-mode). |
+| `void qdt_execute(qdt_t* ptr, const qdt_vec2d* pts, size_t n)` | Computes the Delaunay triangulation of `n` points in one batch. Replaces everything previously stored in the context, including inserted points and constraints. The points are copied; `pts` is not modified and need not stay valid after the call. |
+| `void qdt_execute_parallel(qdt_t* ptr, const qdt_vec2d* pts, size_t n)` | Same as `qdt_execute`, but may use multiple threads. See [Parallel mode](#parallel-mode). |
 | `size_t qdt_insert_point(qdt_t* ptr, qdt_vec2d pt)` | Appends one point to the context and updates the triangulation incrementally. Returns the total number of points in the context after the call, so the new point's index is the return value minus 1. Returns `0` if `ptr` is `NULL`. |
 | `size_t qdt_insert_point_parallel(qdt_t* ptr, qdt_vec2d pt)` | Same result as `qdt_insert_point`. Only a one-time setup step uses multiple threads. See [Parallel mode](#parallel-mode). |
 | `size_t qdt_insert_constraint(qdt_t* ptr, size_t v0, size_t v1)` | Forces the segment between the points with indices `v0` and `v1` to be an edge of the triangulation. Returns `1` if the edge is now a constrained edge (including when it already was an edge), `0` if the constraint was rejected or `ptr` is `NULL`. See [Constrained triangulation](#constrained-triangulation). |
 | `size_t qdt_insert_constraints_batch(qdt_t* ptr, const qdt_edge* edges, size_t num_edges)` | Same as calling `qdt_insert_constraint` for each entry in order, but much faster for more than a few constraints. A rejected entry does not stop the others. Returns the number of accepted entries. |
-| `size_t qdt_triangles_size(qdt_t* ptr)` | Returns the current number of triangles. |
-| `size_t qdt_get_triangle(qdt_t* ptr, size_t T[3], size_t id)` | Writes the three point indices of triangle `id` to `T`. Returns `1` when the triangle exists, `0` otherwise (`T` is left untouched). |
+| `size_t qdt_triangles_size(const qdt_t* ptr)` | Returns the current number of triangles. |
+| `size_t qdt_get_triangle(const qdt_t* ptr, size_t T[3], size_t id)` | Writes the three point indices of triangle `id` to `T`. Returns `1` when the triangle exists, `0` otherwise (`T` is left untouched). |
+| `size_t qdt_points_size(const qdt_t* ptr)` | Returns the number of points in the context: the points of the last batch call plus the points inserted since, duplicates included. Valid point indices are `0 .. qdt_points_size() - 1`. |
+| `size_t qdt_get_point(const qdt_t* ptr, qdt_vec2d* pt, size_t id)` | Writes the coordinates of point `id` to `pt`. Returns `1` when the point exists, `0` otherwise (`pt` is left untouched). |
+| `size_t qdt_point_is_used(const qdt_t* ptr, size_t id)` | Returns `1` if at least one triangle references point `id`. Returns `0` for a duplicate of a point with a lower index, for every point when the context has no triangles, and for an invalid `id`. |
 | `void qdt_destroy(qdt_t* ptr)` | Destroys the context and releases its resources. `NULL` is allowed. |
 
 Passing a `NULL` context to any function is safe: the functions do nothing and
@@ -151,8 +154,14 @@ return `0`.
   are never referenced by a triangle.
 - **Degenerate input.** With fewer than three distinct points, or with all
   points collinear, the result has zero triangles.
-- **Input requirements.** Coordinates must be finite. `NaN` and infinities are
-  not supported. The geometric tests are exact for any overall scale of the
+- **Input requirements.** Coordinates must be finite. A batch call
+  (`qdt_execute*`) with a `NaN` or infinite coordinate, a `NULL` array with
+  `n > 0`, or more than 100,000,000 points is rejected: the context is emptied
+  (no points, no triangles) and nothing else is reported. `qdt_insert_point*`
+  ignores a point with a non-finite coordinate, or one that would take the
+  context beyond 100,000,000 points, and returns the unchanged number of
+  points, so a return value that did not grow signals the rejection. The
+  geometric tests are exact for any overall scale of the
   input and for sets that mix very different magnitudes, with one exception:
   nonzero coordinates with an absolute value below about 2.2e-308 (subnormal
   numbers) have too few significant bits, and the output may then fail to be
@@ -215,13 +224,15 @@ does not matter; with cocircular points, equally valid results can differ.
 - Constraints are **kept** by `qdt_insert_point*`: a point inserted exactly on
   a constrained edge splits it, and both halves stay constrained. They are
   **discarded** by the next `qdt_execute` or `qdt_execute_parallel`.
-- Use `qdt_insert_constraints_batch` whenever you have more than a few
-  constraints. A single call looks up its two end points with a linear search,
-  so its cost grows with the number of points (in the benchmark below, about
-  60 µs per short constraint at 100,000 points and about 1.4 ms at 1 million
-  points); the batch call builds its lookup table once (about 2 µs per short
-  constraint at 1 million points). The cost of a constraint also grows with the
-  number of triangles its segment crosses.
+- A single `qdt_insert_constraint` call finds its two end points in a table
+  that is built together with the internal mesh and kept up to date by every
+  insertion, so the lookup takes constant time and does not grow with the
+  number of points. `qdt_insert_constraints_batch` gives the same result and is
+  the convenient way to insert many constraints in one call. The cost of a
+  constraint grows with the number of triangles its segment crosses. (The
+  benchmark below was measured before the lookup table existed, when a single
+  call searched linearly; its single-call timings no longer apply and have not
+  been re-measured.)
 
 ```c
 /* A flat quadrilateral: the Delaunay triangulation uses the diagonal 1-3.
@@ -256,6 +267,9 @@ but not necessarily in the same order.
   tiny inputs. In the benchmark below it takes about 9% longer than
   `qdt_execute` at 100,000 points, and much longer in relative terms for tiny
   inputs. Use `qdt_execute` for such inputs.
+- If the parallel implementation cannot run (its pre-allocated edge storage is
+  exhausted, or the worker threads cannot be started), the call falls back to
+  the serial algorithm and still returns the complete result.
 
 `qdt_insert_point_parallel` gives the same result as `qdt_insert_point`. The
 insertion itself is single-threaded; only the one-time mesh build performed by
@@ -290,68 +304,50 @@ point, 1 to 2.6 million points):
   before the call (about 200 with `qdt_execute_parallel`); about 72 of these
   remain afterwards.
 - The mesh built by the first insertion or constraint call stays in memory and
-  adds about 400 bytes per point (committed memory). While it is being built,
+  adds about 400 bytes per point (committed memory; the point-to-vertex lookup
+  table added later adds 4 more bytes per point, not included in the figures
+  here). While it is being built,
   the usage peaks at about 515 bytes per point above the level after the batch
   call. The committed figure counts storage that is reserved but not fully
   used. On Linux, where only touched pages count, the resident set grew by
   about 180 bytes per point for the mesh in a measurement with 100,000 points.
   Call `qdt_execute*` again or `qdt_destroy` to release the mesh.
-- Internal indices are 32-bit, so inputs of around 100 million points or more
-  are not supported.
+- Internal indices are 32-bit, so inputs of more than 100,000,000 points are
+  rejected (see [Results](#results)).
 
 ## Example
 
+The complete, compilable program is [`example/example.c`](example/example.c).
+These are the calls it makes, in order (`pts` is an array of `n` points):
+
 ```c
-#include "qdt.h"
-#include <stdio.h>
+qdt_t* q = qdt_create();
 
-int main(void)
+/* Batch-triangulate most of the points. */
+qdt_execute(q, pts, n - 2);
+
+/* Insert the remaining points incrementally. */
+qdt_insert_point(q, pts[n - 2]);
+qdt_insert_point(q, pts[n - 1]);
+
+/* Use qdt_execute_parallel(q, pts, n) for a full parallel batch. */
+/* Use qdt_insert_point_parallel(q, pt) for parallel insertion. */
+
+for (size_t i = 0; i < qdt_triangles_size(q); ++i)
 {
-    /* Points 0-3 form a square (all four are cocircular). Point 4 is its
-       center, and point 5 lies exactly on the edge between points 4 and 2. */
-    qdt_vec2d pts[] = {
-        {0.0, 0.0},
-        {1.0, 0.0},
-        {0.0, 1.0},
-        {1.0, 1.0},
-        {0.5, 0.5},
-        {0.25, 0.75}
-    };
-    size_t n = sizeof(pts) / sizeof(pts[0]);
-
-    qdt_t* q = qdt_create();
-    if (!q)
+    size_t tri[3];
+    if (qdt_get_triangle(q, tri, i))
     {
-        return 1;
+        /* tri[0], tri[1], tri[2] index into pts, counter-clockwise. */
     }
-
-    /* Batch-triangulate most of the points. */
-    qdt_execute(q, pts, n - 2);
-
-    /* Insert the remaining points incrementally. */
-    qdt_insert_point(q, pts[n - 2]);
-    qdt_insert_point(q, pts[n - 1]);
-
-    /* Use qdt_execute_parallel(q, pts, n) for a full parallel batch. */
-    /* Use qdt_insert_point_parallel(q, pt) for parallel insertion. */
-
-    size_t triangle_count = qdt_triangles_size(q);
-    printf("Triangles: %zu\n", triangle_count);
-
-    for (size_t i = 0; i < triangle_count; ++i)
-    {
-        size_t tri[3];
-        if (qdt_get_triangle(q, tri, i))
-        {
-            printf("Triangle %zu: %zu, %zu, %zu\n",
-                   i, tri[0], tri[1], tri[2]);
-        }
-    }
-
-    qdt_destroy(q);
-    return 0;
 }
+
+qdt_destroy(q);
 ```
+
+The program triangulates six points. Points 0-3 form a square (all four are
+cocircular), point 4 is its center, and point 5 lies exactly on the edge between
+points 4 and 2.
 
 Example output (six points, four of them on the convex hull, so
 `2 * 6 - 2 - 4 = 6` triangles):
@@ -535,7 +531,9 @@ Committed private bytes (PrivateUsage) measured around the library calls, in a f
   one takes 1.4x (serial) or 1.6x (parallel) as long as triangulating all of
   them at once, so incremental insertion only pays off for a small number of
   points.
-- **Constraints.** At 1,000,000 points the first constraint call, which
+- **Constraints.** (Measured before the end-point lookup table was added: the
+  comparison of single calls with the batch call below no longer applies.) At
+  1,000,000 points the first constraint call, which
   includes building the internal mesh, takes about 195 ms (28% of the 702 ms
   batch triangulation). After that, `qdt_insert_constraints_batch` inserts
   short constraints at about 2 µs each, while the same 20,000 short constraints
@@ -574,6 +572,83 @@ small sizes only, and `--scenario batch,insert,...` selects scenarios. The
 first-insertion time varies the most between runs. The benchmark also has an
 optional comparison with CGAL (build with `-DQDT_BENCH_CGAL`).
 
+<!-- QDT-VERIFY-BEGIN -->
+## Correctness tests
+
+The results below were produced by `test/qdt_verify.cpp`, which uses only the public C API. It runs randomized and structured test cases and checks every triangulation with exact integer arithmetic, independent of the predicates inside the library: the inputs have integer coordinates with an absolute value of at most 2^28, which `double` represents exactly. A case is one input together with the operations applied to it (for example a point set, then insertions and constraints). The context is verified at the end of the case, and in the incremental scenarios also in between.
+
+### Test environment
+
+- Date: 2026-11-13 02:10 UTC
+- CPU: Intel(R) Core(TM) i7-8700 CPU @ 3.20GHz
+- Hardware threads: 12
+- Memory: 31.9 GiB
+- OS: Windows 11 25H2 (build 26200), x64
+- Compiler (test program): MSVC 19.51.36260, 64-bit; exact arithmetic: built-in 160-bit integers
+- Parameters: iterations = 3000, seed = 0
+
+### Results
+
+**All 16 scenarios passed:** 32,297 cases, 0 failures, 71.85 s.
+
+| Scenario | What is checked | README | Cases | Failures | Time (s) |
+| --- | --- | --- | ---: | ---: | ---: |
+| `api` | API contract: NULL context, out-of-range ids, query functions, duplicates, degenerate contexts, constraint end points, replacement by the next batch call | [Functions](#functions), [Results](#results) | 46 | 0 | 0.00 |
+| `examples` | The README examples (quadrilateral with a constraint, six-point program); the input array is copied and not modified | [Example](#example), [Constrained triangulation](#constrained-triangulation) | 12 | 0 | 0.00 |
+| `guards` | Invalid input: NaN, infinity, NULL array, more than 100,000,000 points | [Results](#results) | 22 | 0 | 0.00 |
+| `structured` | Degenerate and structured inputs: grids, collinear points, duplicates, fewer than three points, coordinates up to 2^28 | [Results](#results) | 160 | 0 | 0.38 |
+| `batch` | Random small point sets with many duplicates and cocircular points, serial and parallel batch call | [Features](#features), [Results](#results) | 6,000 | 0 | 4.37 |
+| `magnitudes` | One point set that mixes magnitudes from 1 to 2^28, including clusters far from the origin | [Results](#results) | 3,000 | 0 | 2.75 |
+| `scale` | Scaling the whole input by 2^-1000 ... 2^900 must not change the result | [Results](#results) | 1,200 | 0 | 0.59 |
+| `circle` | Nearly cocircular points, with insertions on top | [Features](#features) | 400 | 0 | 2.78 |
+| `insert` | Insertion into small triangulations, also into a context that was never filled: duplicates, points on edges, serial and parallel | [Batch and incremental usage](#batch-and-incremental-usage) | 6,000 | 0 | 15.04 |
+| `insertlarge` | Insertion into triangulations of a few thousand points: duplicates, points on edges, points outside the hull | [Batch and incremental usage](#batch-and-incremental-usage) | 31 | 0 | 1.66 |
+| `parmesh` | First insertion builds the internal mesh in parallel (70,000 points, at least 50,000 triangles), then insertions and constraints | [Parallel mode](#parallel-mode) | 12 | 0 | 14.75 |
+| `cdt` | Constraints against an independent oracle for the rules: accepted, rejected, unchanged after a rejection; single calls and batch | [Constrained triangulation](#constrained-triangulation) | 6,000 | 0 | 0.98 |
+| `cdtins` | The same with insertions in between: constraints are kept, and split by points inserted on them | [Constrained triangulation](#constrained-triangulation) | 6,000 | 0 | 3.02 |
+| `cdtequiv` | A batch call equals the single calls in the same order; in general position the order of the constraints does not matter | [Constrained triangulation](#constrained-triangulation) | 1,001 | 0 | 0.26 |
+| `big` | 600,000 to 700,000 points: serial and parallel batch call give valid results and the same triangles | [Parallel mode](#parallel-mode) | 3 | 0 | 22.90 |
+| `contexts` | Independent contexts used from several threads at the same time | [Thread safety](#thread-safety) | 2,410 | 0 | 2.36 |
+
+Notes:
+
+- `examples`: The listing of the six-point example is reproduced exactly, in the same order.
+- `big`: Distributions: uniform, a 1500 x 1500 grid with many duplicates (counts compared, not sets: cocircular ties), a flat band.
+- `contexts`: 8 threads, each with its own contexts (batch, parallel batch and insertions). Plus two parallel batch calls at the same time on 600,000 points.
+
+### What is checked in every case
+
+- Every triangle has three distinct vertices in strictly counter-clockwise order and refers only to the lowest index of a group of duplicate points.
+- Every directed edge occurs once, so triangles do not overlap; the areas of the triangles add up to the area of the convex hull of the points; no hull vertex lies to the right of a boundary edge.
+- Every interior edge is locally Delaunay, except for constrained edges. Without constraints, small inputs are also checked against the empty-circle property for every point.
+- Every accepted constraint is an edge of the triangulation, and a rejected constraint leaves the triangulation unchanged.
+- `qdt_points_size`, `qdt_get_point` and `qdt_point_is_used` agree with the points that were given and with the triangles.
+
+### Not covered
+
+- The fallback of `qdt_execute_parallel` to the serial algorithm (exhausted edge storage, threads that cannot be started) and out-of-memory behavior: these paths cannot be triggered through the public API.
+- Inputs of more than 700,000 points, and the speed and memory figures (see [Performance](#performance)).
+- Coordinates outside the range of the exact check: integers up to 2^28, scaled as a whole by powers of two. Subnormal coordinates are documented as unsupported.
+- Compiling `qdt.h` as C, and every compiler and platform other than the one listed above.
+- Using one context from several threads, which is not supported.
+
+### Reproducing the tests
+
+`test/qdt_verify.cpp` uses only the public API. `--readme README.md` replaces this section (the text between the two `QDT-VERIFY` marker comments, inserted before "Current limitations" the first time) and is refused when a check fails. The program exits with status 1 if a check fails. `--quick` runs a short smoke test and `--scenario LIST` selects scenarios; neither updates the README unless `--allow-partial` is given.
+
+```sh
+# Linux, with libqdt.a built as described in "Building"
+g++ -std=c++14 -O2 -DNDEBUG -pthread -Ilibqdt test/qdt_verify.cpp libqdt.a -lm -o qdt_verify
+./qdt_verify --readme README.md --note "libqdt <commit>, g++ -O2, static library"
+```
+
+```bat
+:: Windows, MSVC; qdt.lib built as a static library with /DQDT_DLL
+cl /std:c++14 /O2 /EHsc /DNDEBUG /DQDT_DLL /Ilibqdt test\qdt_verify.cpp qdt.lib
+qdt_verify --readme README.md --note "libqdt <commit>, MSVC /O2, static library"
+```
+<!-- QDT-VERIFY-END -->
+
 ## Current limitations
 
 - Incremental insertion is intended for adding a small number of points to an
@@ -587,9 +662,9 @@ optional comparison with CGAL (build with `-DQDT_BENCH_CGAL`).
 - A constraint that crosses an already constrained edge, or passes exactly
   through a third point, is rejected (see [Constrained
   triangulation](#constrained-triangulation)). Constraints join existing
-  points; they never add points. A single `qdt_insert_constraint` call costs
-  time proportional to the number of points, so insert many constraints with
-  `qdt_insert_constraints_batch`.
+  points; they never add points. The cost of one `qdt_insert_constraint` call
+  depends on the number of triangles its segment crosses, not on the number of
+  points.
 - Triangle ids are not stable across insertions or constraints, and the order
   of triangles and of the vertices within a triangle is unspecified. Point
   indices are stable; keep the input point order and record insertion order if

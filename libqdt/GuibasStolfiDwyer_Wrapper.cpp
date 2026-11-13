@@ -20,7 +20,7 @@
 namespace wrapper
 {
     using Point = qdt_vec2d;
-    Triangulation delaunay_triangulate(Point* pts, size_t sz);
+    Triangulation delaunay_triangulate(const Point* pts, size_t sz);
 
     namespace robust
     {
@@ -761,6 +761,7 @@ namespace wrapper
             }
         }
 
+        orig_to_local_ = std::move(orig_to_local);
         mesh_built_ = true;
     }
 
@@ -925,6 +926,7 @@ namespace wrapper
             for (auto& th : workers) th.join();
         }
 
+        orig_to_local_ = std::move(orig_to_local);
         mesh_built_ = true;
     }
 
@@ -1073,16 +1075,6 @@ namespace wrapper
 
     void Triangulation::insert_after_mesh_(const qdt_vec2d& p)
     {
-        for (const auto& v : mesh_vertices_)
-        {
-            if (v.p.x == p.x && v.p.y == p.y)
-            {
-                input_points.push_back(p);
-                rep.push_back(v.orig_id);
-                return;
-            }
-        }
-
         if (mesh_halfedges_.empty())
         {
             insert_by_rebuild_(p);
@@ -1098,6 +1090,29 @@ namespace wrapper
         }
         const bool outside = (h_start < 0);
 
+        // Duplicate point. locate_ returns a triangle that contains p, border
+        // included, tested with exact predicates. A vertex of the triangulation
+        // is never inside a triangle or inside one of its edges, so if p has the
+        // coordinates of an existing vertex, that vertex is a corner of the
+        // triangle found. Looking at the three corners is therefore enough; it
+        // replaces a scan over all vertices. A duplicate cannot lie outside the
+        // convex hull, so the outside case needs no check.
+        if (!outside)
+        {
+            int e = h_start;
+            do
+            {
+                const MeshVertex& v = mesh_vertices_[mesh_halfedges_[e].origin];
+                if (v.p.x == p.x && v.p.y == p.y)
+                {
+                    input_points.push_back(p);
+                    rep.push_back(v.orig_id);
+                    return;
+                }
+                e = mesh_halfedges_[e].next;
+            } while (e != h_start);
+        }
+
         const size_t new_id = input_points.size();
         input_points.push_back(p);
         rep.push_back(new_id);
@@ -1111,6 +1126,10 @@ namespace wrapper
             v.halfedge = -1;
             mesh_vertices_.push_back(v);
         }
+        // Keep the point -> mesh vertex table in step (see orig_to_local_).
+        if (orig_to_local_.size() <= new_id)
+            orig_to_local_.resize(new_id + 1, -1);
+        orig_to_local_[new_id] = new_v;
 
         auto he_dest = [&](int e) {
             return mesh_halfedges_[mesh_halfedges_[e].next].origin;
@@ -1157,16 +1176,22 @@ namespace wrapper
         // If p is outside the hull nothing is removed: p is joined to the
         // visible hull edges and the flips take care of the rest.
         std::vector<int>  cavity_hes;
-        std::vector<bool> visited_tri(triangles.size(), false);
+        // Ids of the triangles in the cavity: at most two (the one containing p
+        // and, if p lies on an edge, the one across it), so a linear search is
+        // cheaper than a flag per triangle of the whole triangulation.
+        std::vector<int>  cavity_tris;
+        auto in_cavity = [&](int t) {
+            return std::find(cavity_tris.begin(), cavity_tris.end(), t) != cavity_tris.end();
+            };
         int split_a = -1, split_b = -1; // endpoints of the constrained edge p splits
 
         if (!outside)
         {
             auto add_to_cavity = [&](int h) {
                 const int t = mesh_halfedges_[h].triangle_idx;
-                if (t >= 0 && !visited_tri[t])
+                if (t >= 0 && !in_cavity(t))
                 {
-                    visited_tri[t] = true;
+                    cavity_tris.push_back(t);
                     cavity_hes.push_back(h);
                 }
                 };
@@ -1202,7 +1227,7 @@ namespace wrapper
             {
                 const int tw = mesh_halfedges_[e].twin;
                 int tw_tri = (tw >= 0) ? mesh_halfedges_[tw].triangle_idx : -1;
-                bool tw_in_cavity = (tw_tri >= 0 && visited_tri[tw_tri]);
+                bool tw_in_cavity = (tw_tri >= 0 && in_cavity(tw_tri));
 
                 if (!tw_in_cavity)
                 {
@@ -1220,7 +1245,7 @@ namespace wrapper
         for (int e : visible_hull)
         {
             const int tri_idx = mesh_halfedges_[e].triangle_idx;
-            if (tri_idx >= 0 && visited_tri[tri_idx])
+            if (tri_idx >= 0 && in_cavity(tri_idx))
                 continue;
             const int e1 = mesh_halfedges_[e].next;
             const int a = mesh_halfedges_[e].origin;
@@ -1228,14 +1253,10 @@ namespace wrapper
             boundary_info.push_back({ b, a, e, mesh_halfedges_[e].is_constrained });
         }
 
-        std::vector<int> cavity_tri_indices;
-        for (size_t i = 0; i < visited_tri.size(); ++i)
-        {
-            if (visited_tri[i])
-                cavity_tri_indices.push_back(static_cast<int>(i));
-        }
-        std::sort(cavity_tri_indices.rbegin(), cavity_tri_indices.rend());
-        for (int idx : cavity_tri_indices)
+        // Highest id first: remove_triangle_by_index_ moves the last triangle
+        // into the freed slot, which must not invalidate an id still to come.
+        std::sort(cavity_tris.rbegin(), cavity_tris.rend());
+        for (int idx : cavity_tris)
         {
             remove_triangle_by_index_(idx);
         }
@@ -1389,12 +1410,11 @@ namespace wrapper
 
     int Triangulation::orig_to_local_vtx_(size_t orig_id) const
     {
-        for (size_t i = 0; i < mesh_vertices_.size(); ++i)
-        {
-            if (mesh_vertices_[i].orig_id == orig_id)
-                return static_cast<int>(i);
-        }
-        return -1;
+        // Constant time: the table is maintained by ensure_mesh_*() and
+        // insert_after_mesh_(). Ids past its end have no mesh vertex.
+        if (orig_id >= orig_to_local_.size())
+            return -1;
+        return orig_to_local_[orig_id];
     }
 
     // Calls f(h) for every halfedge h that starts at vertex x, until f returns
@@ -1768,15 +1788,6 @@ namespace wrapper
         if (!edges || num_edges == 0) return 0;
         ensure_mesh_();
 
-        // Constraints never add vertices, so one index table serves the whole
-        // batch instead of one linear search per endpoint.
-        std::vector<int> to_local(input_points.size(), -1);
-        for (size_t i = 0; i < mesh_vertices_.size(); ++i)
-        {
-            if (mesh_vertices_[i].orig_id < to_local.size())
-                to_local[mesh_vertices_[i].orig_id] = static_cast<int>(i);
-        }
-
         size_t count = 0;
         for (size_t i = 0; i < num_edges; ++i)
         {
@@ -1785,9 +1796,9 @@ namespace wrapper
             if (a >= rep.size() || b >= rep.size()) continue;
             a = rep[a];
             b = rep[b];
-            if (a == b || a >= to_local.size() || b >= to_local.size()) continue;
-            const int u = to_local[a];
-            const int v = to_local[b];
+            if (a == b) continue;
+            const int u = orig_to_local_vtx_(a);
+            const int v = orig_to_local_vtx_(b);
             if (u < 0 || v < 0) continue;
             if (insert_constraint_local_(u, v))
                 ++count;
@@ -1795,7 +1806,7 @@ namespace wrapper
         return count;
     }
 
-    Triangulation delaunay_triangulate(Point* pts, size_t sz)
+    Triangulation delaunay_triangulate(const Point* pts, size_t sz)
     {
         const int n = static_cast<int>(sz);
 

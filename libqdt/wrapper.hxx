@@ -8,6 +8,12 @@
 
 namespace wrapper
 {
+    // Largest number of points a context accepts. The internal indices are
+    // 32-bit: the parallel builder allocates 5 * n + 64 Ki quad-edges and a
+    // quad-edge id is 4 * k + r, which stays below 2^31 up to about 107 million
+    // points. Larger inputs are rejected at the API boundary (qdt.cpp).
+    constexpr size_t kMaxPoints = 100000000;
+
     struct Triangulation
     {
         std::vector<std::array<size_t, 3>> triangles;
@@ -45,6 +51,12 @@ namespace wrapper
 
         bool                      mesh_built_ = false;
         std::vector<MeshVertex>   mesh_vertices_;
+        // Index of the mesh vertex for each original point id (-1: the id has
+        // no mesh vertex, e.g. a duplicate of another point). Built together
+        // with the mesh and extended by every insertion; it may be shorter than
+        // input_points when the latest points are duplicates. Mesh vertices are
+        // only ever appended, so an entry stays valid until the mesh is rebuilt.
+        std::vector<int>          orig_to_local_;
         std::vector<MeshHalfEdge> mesh_halfedges_;
         std::vector<int>          free_halfedges_;
         int                       last_face_he_ = 0;
@@ -70,6 +82,10 @@ namespace wrapper
         void legalize_(std::vector<int>& stack);
         bool insert_constraint_local_(int u_local, int v_local);
     };
+
+    // Serial triangulation; defined in GuibasStolfiDwyer_Wrapper.cpp. Declared
+    // here so that the parallel implementation can fall back to it.
+    Triangulation delaunay_triangulate(const qdt_vec2d* pts, size_t sz);
 }
 
 #endif
