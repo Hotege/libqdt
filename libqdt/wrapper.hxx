@@ -25,9 +25,17 @@ namespace wrapper
         void insert(const qdt_vec2d& p);
         void insert_parallel(const qdt_vec2d& p);
 
-        bool insert_constraint(size_t orig_v0, size_t orig_v1);
+        // Both return a qdt_status: QDT_OK, one of the rejection reasons
+        // (QDT_ERR_INVALID_INDEX .. QDT_ERR_THROUGH_POINT, nothing changed) or
+        // QDT_ERR_INTERNAL (an inconsistency was found; the caller must reset
+        // the context). Allocation failures are not caught here, they
+        // propagate as exceptions.
+        qdt_status insert_constraint(size_t orig_v0, size_t orig_v1);
 
-        size_t insert_constraints_batch(const qdt_edge* edges, size_t num_edges);
+        // results (optional) receives the status of each entry. The return
+        // value is QDT_OK if every entry was accepted, QDT_ERR_INTERNAL if
+        // processing had to stop, else the status of the first rejected entry.
+        qdt_status insert_constraints_batch(const qdt_edge* edges, size_t num_edges, qdt_status* results);
 
         void ensure_mesh_();
         void ensure_mesh_parallel_();
@@ -78,9 +86,9 @@ namespace wrapper
         bool segment_intersects_(const qdt_vec2d& a, const qdt_vec2d& b, const qdt_vec2d& c, const qdt_vec2d& d) const;
         int  orig_to_local_vtx_(size_t orig_id) const;
         void mark_constrained_(int h);
-        bool trace_segment_(int u_local, int v_local, std::vector<int>& crossed) const;
+        qdt_status trace_segment_(int u_local, int v_local, std::vector<int>& crossed) const;
         void legalize_(std::vector<int>& stack);
-        bool insert_constraint_local_(int u_local, int v_local);
+        qdt_status insert_constraint_local_(int u_local, int v_local);
     };
 
     // Serial triangulation; defined in GuibasStolfiDwyer_Wrapper.cpp. Declared

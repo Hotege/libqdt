@@ -343,8 +343,8 @@ struct Scenario
     }
 };
 
-typedef void (*ExecFn)(qdt_t*, const qdt_vec2d*, size_t);
-typedef size_t(*InsFn)(qdt_t*, qdt_vec2d);
+typedef qdt_status(*ExecFn)(qdt_t*, const qdt_vec2d*, size_t);
+typedef qdt_status(*InsFn)(qdt_t*, qdt_vec2d, size_t*);
 
 static ExecFn exec_fn(bool par)
 {
@@ -751,10 +751,12 @@ static void sc_examples(Scenario& r, const Config&)
         const qdt_vec2d     pts[4] = { { 0.0, 0.0 },{ 4.0, 0.0 },{ 3.0, 1.0 },{ 1.0, 1.0 } };
         qdt_t* q = qdt_create();
         r.expect(q != NULL, "qdt_create returned NULL");
-        qdt_execute(q, pts, 4);
+        r.expect(qdt_execute(q, pts, 4) == QDT_OK, "quad: qdt_execute did not return QDT_OK");
         r.expect(tri_sorted(tris_of(q)) == tri_sorted(mk(before, 2)), "quad: triangles before the constraint differ from the README");
-        r.expect(qdt_insert_constraint(q, 0, 2) == 1, "quad: constraint 0-2 was not accepted");
+        r.expect(qdt_insert_constraint(q, 0, 2) == QDT_OK, "quad: constraint 0-2 was not accepted");
         r.expect(tri_sorted(tris_of(q)) == tri_sorted(mk(after, 2)), "quad: triangles after the constraint differ from the README");
+        r.expect(qdt_insert_constraint(q, 0, 9) == QDT_ERR_INVALID_INDEX, "quad: constraint 0-9 did not return QDT_ERR_INVALID_INDEX");
+        r.expect(tri_sorted(tris_of(q)) == tri_sorted(mk(after, 2)), "quad: the rejected constraint 0-9 changed the triangulation");
         qdt_destroy(q);
     }
 
@@ -765,9 +767,10 @@ static void sc_examples(Scenario& r, const Config&)
         for (int par = 0; par < 2; ++par)
         {
             qdt_t* q = qdt_create();
-            exec_fn(par != 0)(q, pts, 4);
-            ins_fn(par != 0)(q, pts[4]);
-            ins_fn(par != 0)(q, pts[5]);
+            size_t index = 0;
+            r.expect(exec_fn(par != 0)(q, pts, 4) == QDT_OK, "six-point example: the batch call did not return QDT_OK");
+            r.expect(ins_fn(par != 0)(q, pts[4], &index) == QDT_OK && index == 4, "six-point example: point 4 was not inserted with index 4");
+            r.expect(ins_fn(par != 0)(q, pts[5], &index) == QDT_OK && index == 5, "six-point example: point 5 was not inserted with index 5");
             r.expect(qdt_triangles_size(q) == 6, "six-point example: expected 6 triangles");
             const TriList got = tris_of(q);
             r.expect(tri_sorted(got) == tri_sorted(mk(listing, 6)), "six-point example: triangles differ from the README listing");
@@ -823,16 +826,26 @@ static void sc_examples(Scenario& r, const Config&)
 static void sc_api(Scenario& r, const Config&)
 {
     /* NULL context */
-    r.expect(qdt_insert_point(NULL, qdt_vec2d{ 0, 0 }) == 0, "insert_point(NULL) != 0");
-    r.expect(qdt_insert_point_parallel(NULL, qdt_vec2d{ 0, 0 }) == 0, "insert_point_parallel(NULL) != 0");
-    r.expect(qdt_insert_constraint(NULL, 0, 1) == 0, "insert_constraint(NULL) != 0");
+    {
+        size_t idx = 777;
+        r.expect(qdt_insert_point(NULL, qdt_vec2d{ 0, 0 }, &idx) == QDT_ERR_NULL_CONTEXT && idx == 777,
+            "insert_point(NULL) != QDT_ERR_NULL_CONTEXT, or the index was written");
+        r.expect(qdt_insert_point_parallel(NULL, qdt_vec2d{ 0, 0 }, &idx) == QDT_ERR_NULL_CONTEXT && idx == 777,
+            "insert_point_parallel(NULL) != QDT_ERR_NULL_CONTEXT, or the index was written");
+    }
+    r.expect(qdt_insert_constraint(NULL, 0, 1) == QDT_ERR_NULL_CONTEXT, "insert_constraint(NULL) != QDT_ERR_NULL_CONTEXT");
     const qdt_edge ed = { 0, 1 };
-    r.expect(qdt_insert_constraints_batch(NULL, &ed, 1) == 0, "insert_constraints_batch(NULL) != 0");
+    {
+        qdt_status res[2] = { QDT_OK, QDT_OK };
+        const qdt_edge ed2[2] = { { 0, 1 },{ 1, 2 } };
+        r.expect(qdt_insert_constraints_batch(NULL, ed2, 2, res) == QDT_ERR_NULL_CONTEXT && res[0] == QDT_ERR_NULL_CONTEXT &&
+            res[1] == QDT_ERR_NULL_CONTEXT, "insert_constraints_batch(NULL) != QDT_ERR_NULL_CONTEXT in the return value and in every result");
+    }
     r.expect(qdt_triangles_size(NULL) == 0, "triangles_size(NULL) != 0");
     size_t t[3] = { 7, 8, 9 };
     r.expect(qdt_get_triangle(NULL, t, 0) == 0 && t[0] == 7, "get_triangle(NULL) misbehaves");
-    qdt_execute(NULL, NULL, 0);
-    qdt_execute_parallel(NULL, NULL, 0);
+    r.expect(qdt_execute(NULL, NULL, 0) == QDT_ERR_NULL_CONTEXT, "execute(NULL) != QDT_ERR_NULL_CONTEXT");
+    r.expect(qdt_execute_parallel(NULL, NULL, 0) == QDT_ERR_NULL_CONTEXT, "execute_parallel(NULL) != QDT_ERR_NULL_CONTEXT");
     qdt_destroy(NULL);
     {
         qdt_vec2d tmp = { 5.0, 6.0 };
@@ -844,9 +857,31 @@ static void sc_api(Scenario& r, const Config&)
     /* fresh context */
     qdt_t* q = qdt_create();
     r.expect(qdt_triangles_size(q) == 0 && qdt_points_size(q) == 0, "a fresh context is not empty");
-    r.expect(qdt_insert_constraint(q, 0, 1) == 0, "constraint accepted on an empty context");
-    r.expect(qdt_insert_constraints_batch(q, &ed, 1) == 0, "batch constraint accepted on an empty context");
-    r.expect(qdt_insert_constraints_batch(q, NULL, 0) == 0, "insert_constraints_batch(NULL, 0) != 0");
+    r.expect(qdt_insert_constraint(q, 0, 1) == QDT_ERR_INVALID_INDEX, "constraint on an empty context: expected QDT_ERR_INVALID_INDEX");
+    {
+        qdt_status res = QDT_OK;
+        r.expect(qdt_insert_constraints_batch(q, &ed, 1, &res) == QDT_ERR_INVALID_INDEX && res == QDT_ERR_INVALID_INDEX,
+            "batch constraint on an empty context: expected QDT_ERR_INVALID_INDEX in the return value and in the result");
+        qdt_status res3[3] = { QDT_OK, QDT_OK, QDT_OK };
+        r.expect(qdt_insert_constraints_batch(q, NULL, 3, res3) == QDT_ERR_NULL_ARGUMENT && res3[0] == QDT_ERR_NULL_ARGUMENT &&
+            res3[1] == QDT_ERR_NULL_ARGUMENT && res3[2] == QDT_ERR_NULL_ARGUMENT,
+            "insert_constraints_batch(NULL edges, 3) != QDT_ERR_NULL_ARGUMENT in the return value and in every result");
+        res = QDT_ERR_INTERNAL;
+        r.expect(qdt_insert_constraints_batch(q, NULL, 0, &res) == QDT_OK && res == QDT_ERR_INTERNAL,
+            "insert_constraints_batch(NULL, 0) != QDT_OK, or a result was written");
+    }
+    {
+        /* every defined status (QDT_ERR_INTERNAL .. QDT_OK) has its own text; an undefined one has none */
+        std::set<std::string> texts;
+        bool                  distinct = true;
+        for (int s = static_cast<int>(QDT_ERR_INTERNAL); s <= static_cast<int>(QDT_OK); ++s)
+        {
+            const std::string text = qdt_status_string(static_cast<qdt_status>(s));
+            distinct = distinct && text != "unknown status" && texts.insert(text).second;
+        }
+        r.expect(distinct && std::string(qdt_status_string(static_cast<qdt_status>(12345))) == "unknown status",
+            "qdt_status_string: a defined status has no (distinct) text, or an undefined one has");
+    }
 
     /* queries on a const context */
     const qdt_vec2d sq[4] = { { 0, 0 },{ 4, 0 },{ 3, 1 },{ 1, 1 } };
@@ -886,13 +921,27 @@ static void sc_api(Scenario& r, const Config&)
             ok = ok && qdt_point_is_used(g, i) == want[i];
         }
         r.expect(ok, "duplicates: point_is_used wrong");
-        r.expect(qdt_insert_point(g, qdt_vec2d{ 0.0, 1.0 }) == 6, "duplicates: inserting a duplicate returned the wrong count");
+        size_t idx = 0;
+        r.expect(qdt_insert_point(g, qdt_vec2d{ 0.0, 1.0 }, &idx) == QDT_OK && idx == 5 && qdt_points_size(g) == 6,
+            "duplicates: inserting a duplicate returned the wrong status, index or count");
         r.expect(qdt_point_is_used(g, 5) == 0 && qdt_point_is_used(g, 3) == 1, "duplicates: inserted duplicate reported as used");
-        r.expect(qdt_insert_point(g, qdt_vec2d{ 2.0, 2.0 }) == 7, "duplicates: insert returned the wrong count");
+        r.expect(qdt_insert_point(g, qdt_vec2d{ 2.0, 2.0 }, &idx) == QDT_OK && idx == 6 && qdt_points_size(g) == 7,
+            "duplicates: insert returned the wrong status, index or count");
         r.expect(qdt_point_is_used(g, 6) == 1, "duplicates: inserted point reported as unused");
         qdt_execute(g, dup, 2);
         r.expect(qdt_points_size(g) == 2 && qdt_point_is_used(g, 0) == 0 && qdt_point_is_used(g, 1) == 0,
             "degenerate: point queries wrong");
+
+        /* constraints need triangles: two points, and three collinear points */
+        r.expect(qdt_insert_constraint(g, 0, 1) == QDT_ERR_NO_TRIANGLES, "constraint on two points: expected QDT_ERR_NO_TRIANGLES");
+        const qdt_vec2d line[3] = { { 0, 0 },{ 1, 1 },{ 2, 2 } };
+        qdt_execute(g, line, 3);
+        const qdt_edge le = { 0, 2 };
+        qdt_status     lres = QDT_OK;
+        r.expect(qdt_insert_constraint(g, 0, 2) == QDT_ERR_NO_TRIANGLES &&
+            qdt_insert_constraints_batch(g, &le, 1, &lres) == QDT_ERR_NO_TRIANGLES && lres == QDT_ERR_NO_TRIANGLES &&
+            qdt_triangles_size(g) == 0 && qdt_points_size(g) == 3,
+            "constraint on three collinear points: expected QDT_ERR_NO_TRIANGLES from both functions, and nothing changed");
         qdt_destroy(g);
     }
 
@@ -901,36 +950,39 @@ static void sc_api(Scenario& r, const Config&)
         const qdt_vec2d b[4] = { { 0, 0 },{ 4, 0 },{ 4, 4 },{ 0, 4 } };
         qdt_t* g = qdt_create();
         qdt_execute(g, b, 4);
-        const size_t i4 = qdt_insert_point(g, qdt_vec2d{ 2.0, 1.0 }) - 1;
-        const size_t i5 = qdt_insert_point(g, qdt_vec2d{ 2.0, 1.0 }) - 1; /* duplicate of 4 */
-        const size_t i6 = qdt_insert_point(g, qdt_vec2d{ 1.0, 3.0 }) - 1;
+        size_t i4 = 0, i5 = 0, i6 = 0, i7 = 0;
+        qdt_insert_point(g, qdt_vec2d{ 2.0, 1.0 }, &i4);
+        qdt_insert_point(g, qdt_vec2d{ 2.0, 1.0 }, &i5); /* duplicate of 4 */
+        qdt_insert_point(g, qdt_vec2d{ 1.0, 3.0 }, &i6);
         r.expect(i4 == 4 && i5 == 5 && i6 == 6, "constraint lookup: unexpected point indices");
-        r.expect(qdt_insert_constraint(g, i4, i6) == 1, "constraint between two inserted points rejected");
-        r.expect(qdt_insert_constraint(g, i5, 0) == 1, "constraint through a duplicate's index rejected");
-        r.expect(qdt_insert_constraint(g, i5, i4) == 0, "constraint between duplicates accepted");
+        r.expect(qdt_insert_constraint(g, i4, i6) == QDT_OK, "constraint between two inserted points rejected");
+        r.expect(qdt_insert_constraint(g, i5, 0) == QDT_OK, "constraint through a duplicate's index rejected");
+        r.expect(qdt_insert_constraint(g, i5, i4) == QDT_ERR_SAME_POINT, "constraint between duplicates: expected QDT_ERR_SAME_POINT");
         const qdt_edge be[2] = { { i5, i6 },{ i4, 2 } };
-        r.expect(qdt_insert_constraints_batch(g, be, 2) == 2, "batch with inserted points: wrong count");
-        const size_t i7 = qdt_insert_point(g, qdt_vec2d{ 0.0, 2.0 }) - 1;
+        qdt_status     br[2] = { QDT_ERR_INTERNAL, QDT_ERR_INTERNAL };
+        r.expect(qdt_insert_constraints_batch(g, be, 2, br) == QDT_OK && br[0] == QDT_OK && br[1] == QDT_OK,
+            "batch with inserted points: expected QDT_OK for the call and for both entries");
+        qdt_insert_point(g, qdt_vec2d{ 0.0, 2.0 }, &i7);
         r.expect(i7 == 7, "constraint lookup: unexpected index of the later point");
-        r.expect(qdt_insert_constraint(g, i7, i6) == 1, "constraint to a point inserted after earlier constraints rejected");
+        r.expect(qdt_insert_constraint(g, i7, i6) == QDT_OK, "constraint to a point inserted after earlier constraints rejected");
         qdt_destroy(g);
     }
 
     /* constraint rules and replacement by the next batch call */
-    r.expect(qdt_insert_constraint(q, 0, 99) == 0, "constraint with an invalid index accepted");
-    r.expect(qdt_insert_constraint(q, 99, 98) == 0, "constraint with two invalid indices accepted");
-    r.expect(qdt_insert_constraint(q, static_cast<size_t>(-1), 0) == 0, "constraint with index SIZE_MAX accepted");
-    r.expect(qdt_insert_constraint(q, 2, 2) == 0, "constraint with v0 == v1 accepted");
-    r.expect(qdt_insert_constraint(q, 0, 2) == 1, "constraint 0-2 rejected");
-    r.expect(qdt_insert_constraint(q, 2, 0) == 1, "inserting an existing constraint (reversed) rejected");
-    r.expect(qdt_insert_constraint(q, 1, 3) == 0, "constraint crossing an existing constraint accepted");
+    r.expect(qdt_insert_constraint(q, 0, 99) == QDT_ERR_INVALID_INDEX, "constraint with an invalid index: expected QDT_ERR_INVALID_INDEX");
+    r.expect(qdt_insert_constraint(q, 99, 98) == QDT_ERR_INVALID_INDEX, "constraint with two invalid indices: expected QDT_ERR_INVALID_INDEX");
+    r.expect(qdt_insert_constraint(q, static_cast<size_t>(-1), 0) == QDT_ERR_INVALID_INDEX, "constraint with index SIZE_MAX: expected QDT_ERR_INVALID_INDEX");
+    r.expect(qdt_insert_constraint(q, 2, 2) == QDT_ERR_SAME_POINT, "constraint with v0 == v1: expected QDT_ERR_SAME_POINT");
+    r.expect(qdt_insert_constraint(q, 0, 2) == QDT_OK, "constraint 0-2 rejected");
+    r.expect(qdt_insert_constraint(q, 2, 0) == QDT_OK, "inserting an existing constraint (reversed) rejected");
+    r.expect(qdt_insert_constraint(q, 1, 3) == QDT_ERR_CROSSES_CONSTRAINT, "constraint crossing an existing constraint: expected QDT_ERR_CROSSES_CONSTRAINT");
     qdt_execute(q, sq, 4);
-    r.expect(qdt_insert_constraint(q, 1, 3) == 1, "constraints were not discarded by qdt_execute");
+    r.expect(qdt_insert_constraint(q, 1, 3) == QDT_OK, "constraints were not discarded by qdt_execute");
     qdt_execute(q, NULL, 0);
     r.expect(qdt_triangles_size(q) == 0 && qdt_points_size(q) == 0, "execute with n = 0 left data behind");
     for (int i = 0; i < 5; ++i)
     {
-        qdt_insert_point(q, qdt_vec2d{ static_cast<double>(i), static_cast<double>(i * i) });
+        qdt_insert_point(q, qdt_vec2d{ static_cast<double>(i), static_cast<double>(i * i) }, NULL);
     }
     r.expect(qdt_triangles_size(q) == 3, "insertions into an emptied context: wrong triangle count");
     qdt_destroy(q);
@@ -946,30 +998,34 @@ static void sc_guards(Scenario& r, const Config&)
     {
         const ExecFn run = exec_fn(par != 0);
         qdt_t* g = qdt_create();
+        r.expect(run(g, ok4, 4) == QDT_OK && qdt_triangles_size(g) == 2, "guards: setup did not give QDT_OK and 2 triangles");
+        r.expect(run(g, NULL, 4) == QDT_ERR_NULL_ARGUMENT && qdt_triangles_size(g) == 0 && qdt_points_size(g) == 0,
+            "a NULL array with n > 0: expected QDT_ERR_NULL_ARGUMENT and an empty context");
         run(g, ok4, 4);
-        r.expect(qdt_triangles_size(g) == 2, "guards: setup did not give 2 triangles");
-        run(g, NULL, 4);
-        r.expect(qdt_triangles_size(g) == 0 && qdt_points_size(g) == 0, "a NULL array with n > 0 did not empty the context");
+        r.expect(run(g, nan4, 4) == QDT_ERR_NOT_FINITE && qdt_triangles_size(g) == 0 && qdt_points_size(g) == 0,
+            "NaN input: expected QDT_ERR_NOT_FINITE and an empty context");
         run(g, ok4, 4);
-        run(g, nan4, 4);
-        r.expect(qdt_triangles_size(g) == 0 && qdt_points_size(g) == 0, "NaN input did not empty the context");
+        r.expect(run(g, inf4, 4) == QDT_ERR_NOT_FINITE && qdt_triangles_size(g) == 0 && qdt_points_size(g) == 0,
+            "+infinity input: expected QDT_ERR_NOT_FINITE and an empty context");
         run(g, ok4, 4);
-        run(g, inf4, 4);
-        r.expect(qdt_triangles_size(g) == 0 && qdt_points_size(g) == 0, "+infinity input did not empty the context");
+        r.expect(run(g, ninf4, 4) == QDT_ERR_NOT_FINITE && qdt_triangles_size(g) == 0 && qdt_points_size(g) == 0,
+            "-infinity input: expected QDT_ERR_NOT_FINITE and an empty context");
         run(g, ok4, 4);
-        run(g, ninf4, 4);
-        r.expect(qdt_triangles_size(g) == 0 && qdt_points_size(g) == 0, "-infinity input did not empty the context");
+        /* rejected by the size limit before any point is read; the size limit is checked before the NULL array */
+        r.expect(run(g, ok4, static_cast<size_t>(100000001)) == QDT_ERR_TOO_MANY_POINTS && qdt_triangles_size(g) == 0 && qdt_points_size(g) == 0,
+            "n > 100,000,000: expected QDT_ERR_TOO_MANY_POINTS and an empty context");
         run(g, ok4, 4);
-        run(g, ok4, static_cast<size_t>(100000001)); /* rejected by the size limit before any point is read */
-        r.expect(qdt_triangles_size(g) == 0 && qdt_points_size(g) == 0, "n > 100,000,000 did not empty the context");
-        run(g, ok4, 4);
-        r.expect(qdt_triangles_size(g) == 2, "the context is unusable after a rejected call");
+        r.expect(run(g, NULL, static_cast<size_t>(100000001)) == QDT_ERR_TOO_MANY_POINTS && qdt_points_size(g) == 0,
+            "n > 100,000,000 with a NULL array: expected QDT_ERR_TOO_MANY_POINTS");
+        r.expect(run(g, ok4, 4) == QDT_OK && qdt_triangles_size(g) == 2, "the context is unusable after a rejected call");
 
         const InsFn ins = ins_fn(par != 0);
-        r.expect(ins(g, qdt_vec2d{ std::nan(""), 0.0 }) == 4, "a NaN point was inserted");
-        r.expect(ins(g, qdt_vec2d{ 0.0, HUGE_VAL }) == 4, "an infinite point was inserted");
+        size_t      idx = 777;
+        r.expect(ins(g, qdt_vec2d{ std::nan(""), 0.0 }, &idx) == QDT_ERR_NOT_FINITE && idx == 777, "a NaN point: expected QDT_ERR_NOT_FINITE and no index");
+        r.expect(ins(g, qdt_vec2d{ 0.0, HUGE_VAL }, &idx) == QDT_ERR_NOT_FINITE && idx == 777, "an infinite point: expected QDT_ERR_NOT_FINITE and no index");
         r.expect(qdt_triangles_size(g) == 2 && qdt_points_size(g) == 4, "a rejected point changed the context");
-        r.expect(ins(g, qdt_vec2d{ 2.0, 0.5 }) == 5, "a valid point after rejected ones: wrong count");
+        r.expect(ins(g, qdt_vec2d{ 2.0, 0.5 }, &idx) == QDT_OK && idx == 4 && qdt_points_size(g) == 5,
+            "a valid point after rejected ones: wrong status, index or count");
         qdt_destroy(g);
     }
 }
@@ -1225,7 +1281,7 @@ static void sc_circle(Scenario& r, const Config& c)
         {
             const double a = 2 * kPi * static_cast<double>(rng() % 100000) / 100000.0;
             const P      p = { static_cast<ll>(std::llround(Rr * std::cos(a))), static_cast<ll>(std::llround(Rr * std::sin(a))) };
-            qdt_insert_point(q, qdt_vec2d{ static_cast<double>(p.x), static_cast<double>(p.y) });
+            qdt_insert_point(q, qdt_vec2d{ static_cast<double>(p.x), static_cast<double>(p.y) }, NULL);
             pts.push_back(p);
             e = verify(q, pts, ConSet(), true);
             if (!e.empty())
@@ -1286,11 +1342,12 @@ static void sc_insert(Scenario& r, const Config& c)
                 {
                     p = gen(rng, 1, R)[0];
                 }
-                const size_t ret = ins(q, qdt_vec2d{ static_cast<double>(p.x), static_cast<double>(p.y) });
+                size_t           idx = 0;
+                const qdt_status st = ins(q, qdt_vec2d{ static_cast<double>(p.x), static_cast<double>(p.y) }, &idx);
                 pts.push_back(p);
-                if (ret != pts.size())
+                if (st != QDT_OK || idx + 1 != pts.size())
                 {
-                    msg = fmt("insert_point returned %zu, expected %zu", ret, pts.size());
+                    msg = fmt("insert_point returned \"%s\" with index %zu, expected QDT_OK with index %zu", qdt_status_string(st), idx, pts.size() - 1);
                 }
                 else
                 {
@@ -1340,11 +1397,12 @@ static void sc_insertlarge(Scenario& r, const Config& c)
             case 2: p = P{ signed_rand(rng, R) , signed_rand(rng, R) }; break; /* may be outside the hull */
             default: p = gen(rng, 1, R)[0];
             }
-            const size_t ret = qdt_insert_point(q, qdt_vec2d{ static_cast<double>(p.x), static_cast<double>(p.y) });
+            size_t           idx = 0;
+            const qdt_status st = qdt_insert_point(q, qdt_vec2d{ static_cast<double>(p.x), static_cast<double>(p.y) }, &idx);
             pts.push_back(p);
-            if (ret != pts.size())
+            if (st != QDT_OK || idx + 1 != pts.size())
             {
-                msg = "insert_point returned the wrong count";
+                msg = "insert_point returned the wrong status or index";
                 break;
             }
             if (i % 100 == 99)
@@ -1385,31 +1443,64 @@ static Edge min_max(size_t a, size_t b)
     return Edge(std::min(a, b), std::max(a, b));
 }
 
+/* The status the documented rules give for a constraint between the points a and
+   b (valid indices), given the constraints accepted so far (as lowest-duplicate
+   pairs). The reasons are checked in the documented order. A segment can both
+   pass through a third point and cross a constraint; the library may report
+   either of the two, so then *alt is the other one (otherwise *alt == the result). */
+static qdt_status constraint_status(const std::vector<P>& pts, const std::vector<size_t>& rep, const std::vector<Edge>& acc, size_t a,
+    size_t b, bool have_tris, qdt_status* alt)
+{
+    const size_t ra = rep[a], rb = rep[b];
+    *alt = QDT_OK;
+    qdt_status st = QDT_OK;
+    if (ra == rb)
+    {
+        st = QDT_ERR_SAME_POINT;
+    }
+    else if (!have_tris)
+    {
+        st = QDT_ERR_NO_TRIANGLES;
+    }
+    else
+    {
+        bool through = false, cross = false;
+        for (size_t j = 0; j < pts.size() && !through; ++j)
+        {
+            through = rep[j] == j && on_open_segment(pts[ra], pts[rb], pts[j]); /* passes exactly through a third point */
+        }
+        for (size_t i = 0; i < acc.size() && !cross; ++i)
+        {
+            cross = proper_cross(pts[ra], pts[rb], pts[acc[i].first], pts[acc[i].second]); /* crosses an accepted constraint */
+        }
+        if (through && cross)
+        {
+            st = QDT_ERR_THROUGH_POINT;
+            *alt = QDT_ERR_CROSSES_CONSTRAINT;
+        }
+        else if (through)
+        {
+            st = QDT_ERR_THROUGH_POINT;
+        }
+        else if (cross)
+        {
+            st = QDT_ERR_CROSSES_CONSTRAINT;
+        }
+    }
+    if (*alt == QDT_OK)
+    {
+        *alt = st;
+    }
+    return st;
+}
+
 /* Whether the documented rules say that a constraint between the points a and b
    is accepted, given the constraints accepted so far (as lowest-duplicate pairs). */
 static bool constraint_ok(const std::vector<P>& pts, const std::vector<size_t>& rep, const std::vector<Edge>& acc, size_t a,
     size_t b, bool have_tris)
 {
-    const size_t ra = rep[a], rb = rep[b];
-    if (ra == rb || !have_tris)
-    {
-        return false;
-    }
-    for (size_t j = 0; j < pts.size(); ++j)
-    {
-        if (rep[j] == j && on_open_segment(pts[ra], pts[rb], pts[j]))
-        {
-            return false; /* passes exactly through a third point */
-        }
-    }
-    for (size_t i = 0; i < acc.size(); ++i)
-    {
-        if (proper_cross(pts[ra], pts[rb], pts[acc[i].first], pts[acc[i].second]))
-        {
-            return false; /* crosses an accepted constraint */
-        }
-    }
-    return true;
+    qdt_status alt;
+    return constraint_status(pts, rep, acc, a, b, have_tris, &alt) == QDT_OK;
 }
 
 static ll gcd_ll(ll a, ll b)
@@ -1453,12 +1544,15 @@ static void sc_constraints(Scenario& r, const Config& c, bool do_insert)
                 const bool                tris = has_tris(pts);
                 std::vector<qdt_edge>     edges;
                 std::vector<char>         expect;
+                std::vector<qdt_status>   want_st, want_alt; /* the status the oracle gives, and the other one that is allowed */
                 std::vector<Edge>         cand;
                 std::vector<Edge>         acc_local = acc;
                 for (size_t i = 0; i < m; ++i)
                 {
-                    const size_t a = rng() % pts.size(), b = rng() % pts.size();
-                    const bool   ok = constraint_ok(pts, rep, acc_local, a, b, tris);
+                    const size_t     a = rng() % pts.size(), b = rng() % pts.size();
+                    qdt_status       alt;
+                    const qdt_status st = constraint_status(pts, rep, acc_local, a, b, tris, &alt);
+                    const bool       ok = st == QDT_OK;
                     if (ok)
                     {
                         acc_local.push_back(min_max(rep[a], rep[b]));
@@ -1466,33 +1560,45 @@ static void sc_constraints(Scenario& r, const Config& c, bool do_insert)
                     const qdt_edge e = { a, b };
                     edges.push_back(e);
                     expect.push_back(ok ? 1 : 0);
+                    want_st.push_back(st);
+                    want_alt.push_back(alt);
                     cand.push_back(Edge(rep[a], rep[b]));
                 }
                 if (batch)
                 {
-                    const size_t accepted = qdt_insert_constraints_batch(q, edges.data(), edges.size());
-                    size_t       want = 0;
-                    for (size_t i = 0; i < m; ++i) want += expect[i] ? 1 : 0;
-                    if (accepted != want)
+                    std::vector<qdt_status> got(m, QDT_ERR_INTERNAL);
+                    const qdt_status        ret = qdt_insert_constraints_batch(q, edges.data(), edges.size(), got.data());
+                    qdt_status              first_rejection = QDT_OK;
+                    for (size_t i = 0; i < m && msg.empty(); ++i)
                     {
-                        msg = fmt("batch accepted %zu constraints, expected %zu", accepted, want);
+                        if (got[i] != want_st[i] && got[i] != want_alt[i])
+                        {
+                            msg = fmt("batch entry %zu (%zu, %zu): got \"%s\", expected \"%s\"", i, edges[i].v0, edges[i].v1,
+                                qdt_status_string(got[i]), qdt_status_string(want_st[i]));
+                        }
+                        else if (first_rejection == QDT_OK)
+                        {
+                            first_rejection = got[i];
+                        }
+                    }
+                    if (msg.empty() && ret != first_rejection)
+                    {
+                        msg = fmt("batch returned \"%s\", expected the status of the first rejected entry, \"%s\"", qdt_status_string(ret),
+                            qdt_status_string(first_rejection));
                     }
                 }
                 else
                 {
                     for (size_t i = 0; i < m && msg.empty(); ++i)
                     {
-                        const TriList before = tri_sorted(tris_of(q));
-                        const size_t  rv = qdt_insert_constraint(q, edges[i].v0, edges[i].v1);
-                        if (rv > 1)
+                        const TriList    before = tri_sorted(tris_of(q));
+                        const qdt_status rv = qdt_insert_constraint(q, edges[i].v0, edges[i].v1);
+                        if (rv != want_st[i] && rv != want_alt[i])
                         {
-                            msg = "insert_constraint returned a value above 1";
+                            msg = fmt("constraint (%zu, %zu): got \"%s\", expected \"%s\"", edges[i].v0, edges[i].v1, qdt_status_string(rv),
+                                qdt_status_string(want_st[i]));
                         }
-                        else if ((rv == 1) != (expect[i] != 0))
-                        {
-                            msg = fmt("%s constraint (%zu, %zu)", rv ? "unexpected accept of" : "wrongly rejected", edges[i].v0, edges[i].v1);
-                        }
-                        else if (rv == 0 && tri_sorted(tris_of(q)) != before)
+                        else if (rv != QDT_OK && tri_sorted(tris_of(q)) != before)
                         {
                             msg = "a rejected constraint changed the triangulation";
                         }
@@ -1543,7 +1649,7 @@ static void sc_constraints(Scenario& r, const Config& c, bool do_insert)
                     {
                         p = gen(rng, 1, R)[0];
                     }
-                    qdt_insert_point(q, qdt_vec2d{ static_cast<double>(p.x), static_cast<double>(p.y) });
+                    qdt_insert_point(q, qdt_vec2d{ static_cast<double>(p.x), static_cast<double>(p.y) }, NULL);
                     const size_t idx = pts.size();
                     pts.push_back(p);
                     bool dup = false;
@@ -1645,20 +1751,29 @@ static void sc_cdtequiv(Scenario& r, const Config& c)
         {
             qdt_t* qs = make_ctx(pts);
             qdt_t* qb = make_ctx(pts);
-            size_t  acc_s = 0;
             ConSet  cons;
+            std::vector<qdt_status> st_s(m), st_b(m, QDT_ERR_INTERNAL);
             for (size_t i = 0; i < m; ++i)
             {
-                if (qdt_insert_constraint(qs, list[i].v0, list[i].v1) == 1)
+                st_s[i] = qdt_insert_constraint(qs, list[i].v0, list[i].v1);
+                if (st_s[i] == QDT_OK)
                 {
-                    ++acc_s;
                     cons.insert(min_max(list[i].v0, list[i].v1));
                 }
             }
-            const size_t acc_b = qdt_insert_constraints_batch(qb, list.data(), list.size());
-            if (acc_s != acc_b)
+            const qdt_status ret_b = qdt_insert_constraints_batch(qb, list.data(), list.size(), st_b.data());
+            qdt_status       first_s = QDT_OK; /* the batch returns the status of the first rejected entry */
+            for (size_t i = 0; i < m && first_s == QDT_OK; ++i)
             {
-                msg = fmt("batch accepted %zu, single calls %zu", acc_b, acc_s);
+                first_s = st_s[i];
+            }
+            if (st_s != st_b)
+            {
+                msg = "batch and single calls gave different statuses";
+            }
+            else if (ret_b != first_s)
+            {
+                msg = "the batch call did not return the status of the first rejected entry";
             }
             else if (tri_sorted(tris_of(qs)) != tri_sorted(tris_of(qb)))
             {
@@ -1705,11 +1820,11 @@ static void sc_cdtequiv(Scenario& r, const Config& c)
                 bool    all = true;
                 for (size_t i = 0; i < fwd.size(); ++i)
                 {
-                    all = all && qdt_insert_constraint(qf, fwd[i].v0, fwd[i].v1) == 1;
-                    all = all && qdt_insert_constraint(qr, rev[i].v0, rev[i].v1) == 1;
+                    all = all && qdt_insert_constraint(qf, fwd[i].v0, fwd[i].v1) == QDT_OK;
+                    all = all && qdt_insert_constraint(qr, rev[i].v0, rev[i].v1) == QDT_OK;
                 }
-                all = all && qdt_insert_constraints_batch(qh, shuf.data(), shuf.size()) == shuf.size();
-                all = all && qdt_insert_constraints_batch(qg, fwd.data(), fwd.size()) == fwd.size();
+                all = all && qdt_insert_constraints_batch(qh, shuf.data(), shuf.size(), NULL) == QDT_OK;
+                all = all && qdt_insert_constraints_batch(qg, fwd.data(), fwd.size(), NULL) == QDT_OK;
                 if (!all)
                 {
                     msg = "a compatible constraint was rejected";
@@ -1766,11 +1881,12 @@ static void parmesh_case(Scenario& r, bool par_exec, bool par_ins, uint64_t sd)
             }
             default: p = gen(rng, 1, R)[0];
             }
-            const size_t ret = ins(q, qdt_vec2d{ static_cast<double>(p.x), static_cast<double>(p.y) });
+            size_t           idx = 0;
+            const qdt_status st = ins(q, qdt_vec2d{ static_cast<double>(p.x), static_cast<double>(p.y) }, &idx);
             pts.push_back(p);
-            if (ret != pts.size())
+            if (st != QDT_OK || idx + 1 != pts.size())
             {
-                msg = "insert returned the wrong count";
+                msg = "insert returned the wrong status or index";
             }
         }
         if (msg.empty())
@@ -1785,18 +1901,19 @@ static void parmesh_case(Scenario& r, bool par_exec, bool par_ins, uint64_t sd)
             /* every other constraint starts at a point inserted after the mesh was built */
             const size_t a = (i % 2) ? pts.size() - 1 - rng() % 300 : rng() % pts.size();
             const size_t b = (i % 3 == 0) ? pts.size() - 1 - rng() % 300 : rng() % pts.size();
-            const bool   ok = constraint_ok(pts, rep, acc, a, b, true);
+            qdt_status    alt;
+            const qdt_status want = constraint_status(pts, rep, acc, a, b, true, &alt);
             const TriList before = tri_sorted(tris_of(q));
-            const size_t  rv = qdt_insert_constraint(q, a, b);
-            if (rv != (ok ? 1u : 0u))
+            const qdt_status rv = qdt_insert_constraint(q, a, b);
+            if (rv != want && rv != alt)
             {
-                msg = fmt("%s constraint (%zu, %zu)", rv ? "unexpected accept of" : "wrongly rejected", a, b);
+                msg = fmt("constraint (%zu, %zu): got \"%s\", expected \"%s\"", a, b, qdt_status_string(rv), qdt_status_string(want));
             }
-            else if (!rv && tri_sorted(tris_of(q)) != before)
+            else if (rv != QDT_OK && tri_sorted(tris_of(q)) != before)
             {
                 msg = "a rejected constraint changed the triangulation";
             }
-            else if (ok)
+            else if (rv == QDT_OK)
             {
                 acc.push_back(min_max(rep[a], rep[b]));
             }
@@ -1922,7 +2039,7 @@ static void contexts_worker(Scenario& r, const Config& c, unsigned t, uint64_t c
         for (size_t i = 0; i < k && msg.empty(); ++i)
         {
             const P p = gen(rng, 1, R)[0];
-            ins_fn(!par)(q, qdt_vec2d{ static_cast<double>(p.x), static_cast<double>(p.y) });
+            ins_fn(!par)(q, qdt_vec2d{ static_cast<double>(p.x), static_cast<double>(p.y) }, NULL);
             pts.push_back(p);
             msg = verify(q, pts, ConSet(), true);
         }
@@ -1998,11 +2115,12 @@ struct Entry
 };
 
 static const Entry kEntries[] = {
-    { "api", "API contract: NULL context, out-of-range ids, query functions, duplicates, degenerate contexts, constraint end points, replacement by the next batch call",
+    { "api", "API contract: error codes for a NULL context and NULL arguments, status texts, out-of-range ids, query functions, duplicates, degenerate contexts, constraint end points, replacement by the next batch call",
       "[Functions](#functions), [Results](#results)", sc_api, false },
     { "examples", "The README examples (quadrilateral with a constraint, six-point program); the input array is copied and not modified",
       "[Example](#example), [Constrained triangulation](#constrained-triangulation)", sc_examples, false },
-    { "guards", "Invalid input: NaN, infinity, NULL array, more than 100,000,000 points", "[Results](#results)", sc_guards, false },
+    { "guards", "Invalid input and its error code: NaN, infinity, NULL array, more than 100,000,000 points, and the order of the checks",
+      "[Results](#results), [Error handling](#error-handling)", sc_guards, false },
     { "structured", "Degenerate and structured inputs: grids, collinear points, duplicates, fewer than three points, coordinates up to 2^28",
       "[Results](#results)", sc_structured, false },
     { "batch", "Random small point sets with many duplicates and cocircular points, serial and parallel batch call", "[Features](#features), [Results](#results)",
@@ -2016,7 +2134,7 @@ static const Entry kEntries[] = {
       "[Batch and incremental usage](#batch-and-incremental-usage)", sc_insertlarge, false },
     { "parmesh", "First insertion builds the internal mesh in parallel (70,000 points, at least 50,000 triangles), then insertions and constraints",
       "[Parallel mode](#parallel-mode)", sc_parmesh, false },
-    { "cdt", "Constraints against an independent oracle for the rules: accepted, rejected, unchanged after a rejection; single calls and batch",
+    { "cdt", "Constraints against an independent oracle for the rules: accepted, rejected with the documented error code, unchanged after a rejection; single calls and batch (per-entry results)",
       "[Constrained triangulation](#constrained-triangulation)", sc_cdt, false },
     { "cdtins", "The same with insertions in between: constraints are kept, and split by points inserted on them",
       "[Constrained triangulation](#constrained-triangulation)", sc_cdtins, false },
@@ -2338,8 +2456,8 @@ static std::string build_report(const Config& cfg, const std::vector<std::string
         "area of the convex hull of the points; no hull vertex lies to the right of a boundary edge.\n";
     o += "- Every interior edge is locally Delaunay, except for constrained edges. Without constraints, small "
         "inputs are also checked against the empty-circle property for every point.\n";
-    o += "- Every accepted constraint is an edge of the triangulation, and a rejected constraint leaves the "
-        "triangulation unchanged.\n";
+    o += "- Every accepted constraint is an edge of the triangulation, and a rejected constraint returns the "
+        "documented error code and leaves the triangulation unchanged.\n";
     o += "- `qdt_points_size`, `qdt_get_point` and `qdt_point_is_used` agree with the points that were given and "
         "with the triangles.\n\n";
 

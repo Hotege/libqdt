@@ -12,6 +12,9 @@ the triangulation).
 - Delaunay triangulation of 2D points with `double` coordinates.
 - Simple C API with an opaque handle; no dependencies beyond the C++ standard
   library.
+- No C++ exception ever crosses the C API: out-of-memory and other internal
+  errors are handled inside the library (see [Error handling](#error-handling)),
+  so every function is safe to call from C.
 - Robust geometric predicates: orientation and in-circle tests use a
   floating-point filter with an exact-arithmetic fallback, so rounding errors
   do not corrupt the result on degenerate or nearly degenerate input
@@ -36,6 +39,8 @@ Building the library from source:
 
 - A C++14 (or later) compiler and a threads library (`-pthread` on Linux). The
   sources compile with GCC 13 using `-std=c++14`; C++11 is not sufficient.
+  C++ exceptions must be enabled (the default): the library throws and catches
+  them internally, so do not build it with `-fno-exceptions` or without `/EHsc`.
 - Source files: `qdt.cpp`, `GuibasStolfiDwyer_Wrapper.cpp`,
   `GuibasStolfiDwyer_Threads.cpp`, plus the headers `qdt.h` and `wrapper.hxx`.
 
@@ -118,13 +123,13 @@ typedef struct qdt_t qdt_t; /* Opaque triangulation context. */
 
 | Function | Description |
 | --- | --- |
-| `qdt_t* qdt_create(void)` | Creates a new, empty triangulation context. See [Error handling](#error-handling). |
-| `void qdt_execute(qdt_t* ptr, const qdt_vec2d* pts, size_t n)` | Computes the Delaunay triangulation of `n` points in one batch. Replaces everything previously stored in the context, including inserted points and constraints. The points are copied; `pts` is not modified and need not stay valid after the call. |
+| `qdt_t* qdt_create(void)` | Creates a new, empty triangulation context. Returns `NULL` if the memory for it cannot be allocated. See [Error handling](#error-handling). |
+| `void qdt_execute(qdt_t* ptr, const qdt_vec2d* pts, size_t n)` | Computes the Delaunay triangulation of `n` points in one batch. Replaces everything previously stored in the context, including inserted points and constraints. The points are copied; `pts` is not modified and need not stay valid after the call. If the call is rejected or fails for lack of memory, the context is left empty (see [Error handling](#error-handling)). |
 | `void qdt_execute_parallel(qdt_t* ptr, const qdt_vec2d* pts, size_t n)` | Same as `qdt_execute`, but may use multiple threads. See [Parallel mode](#parallel-mode). |
-| `size_t qdt_insert_point(qdt_t* ptr, qdt_vec2d pt)` | Appends one point to the context and updates the triangulation incrementally. Returns the total number of points in the context after the call, so the new point's index is the return value minus 1. Returns `0` if `ptr` is `NULL`. |
+| `size_t qdt_insert_point(qdt_t* ptr, qdt_vec2d pt)` | Appends one point to the context and updates the triangulation incrementally. Returns the total number of points in the context after the call, so the new point's index is the return value minus 1. Returns `0` if `ptr` is `NULL` or if the insertion failed for lack of memory (the context is then empty; see [Error handling](#error-handling)). |
 | `size_t qdt_insert_point_parallel(qdt_t* ptr, qdt_vec2d pt)` | Same result as `qdt_insert_point`. Only a one-time setup step uses multiple threads. See [Parallel mode](#parallel-mode). |
-| `size_t qdt_insert_constraint(qdt_t* ptr, size_t v0, size_t v1)` | Forces the segment between the points with indices `v0` and `v1` to be an edge of the triangulation. Returns `1` if the edge is now a constrained edge (including when it already was an edge), `0` if the constraint was rejected or `ptr` is `NULL`. See [Constrained triangulation](#constrained-triangulation). |
-| `size_t qdt_insert_constraints_batch(qdt_t* ptr, const qdt_edge* edges, size_t num_edges)` | Same as calling `qdt_insert_constraint` for each entry in order, but much faster for more than a few constraints. A rejected entry does not stop the others. Returns the number of accepted entries. |
+| `size_t qdt_insert_constraint(qdt_t* ptr, size_t v0, size_t v1)` | Forces the segment between the points with indices `v0` and `v1` to be an edge of the triangulation. Returns `1` if the edge is now a constrained edge (including when it already was an edge), `0` if the constraint was rejected, if the call failed for lack of memory (the context is then empty), or if `ptr` is `NULL`. See [Constrained triangulation](#constrained-triangulation). |
+| `size_t qdt_insert_constraints_batch(qdt_t* ptr, const qdt_edge* edges, size_t num_edges)` | Same as calling `qdt_insert_constraint` for each entry in order, but much faster for more than a few constraints. A rejected entry does not stop the others. Returns the number of accepted entries, or `0` if the call failed for lack of memory (the context is then empty). |
 | `size_t qdt_triangles_size(const qdt_t* ptr)` | Returns the current number of triangles. |
 | `size_t qdt_get_triangle(const qdt_t* ptr, size_t T[3], size_t id)` | Writes the three point indices of triangle `id` to `T`. Returns `1` when the triangle exists, `0` otherwise (`T` is left untouched). |
 | `size_t qdt_points_size(const qdt_t* ptr)` | Returns the number of points in the context: the points of the last batch call plus the points inserted since, duplicates included. Valid point indices are `0 .. qdt_points_size() - 1`. |
@@ -280,11 +285,36 @@ about the same time in both.
 
 ### Error handling
 
-QDT has no error codes and does not catch C++ exceptions at the API boundary.
-Allocation failures surface as a `std::bad_alloc` exception thrown from
-`qdt_create`, `qdt_execute*`, or `qdt_insert_point*`. `qdt_create` does not
-return `NULL`. Letting an exception propagate into C code is undefined
-behavior, so treat out-of-memory as fatal when calling from C.
+QDT has no error codes, but it never lets a C++ exception reach the caller:
+every function of `qdt.h` catches all exceptions at the API boundary (an
+allocation failure surfaces inside the library as `std::bad_alloc`). The
+functions can therefore be called safely from C and from any other language
+that can call C functions.
+
+- `qdt_create` returns `NULL` if the memory for the context cannot be
+  allocated.
+- If any other function runs out of memory while it changes a context, the
+  context is **emptied**: no points, no triangles, no constraints and no
+  internal mesh. This is the same state as after a rejected batch call (see
+  [Results](#results)). The context stays valid: it can be queried, reused (for
+  example with `qdt_execute`) and destroyed. QDT discards the data instead of
+  keeping it, because a failed operation may have updated some internal
+  containers and not others, so what was left would not be a consistent
+  triangulation.
+- The return value shows the failure as follows. `qdt_insert_point*` returns
+  `0`; the point count did not grow, which is also how a rejected point shows.
+  `qdt_insert_constraint` and `qdt_insert_constraints_batch` return `0`. The
+  batch functions `qdt_execute*` return nothing.
+- After a call that failed for lack of memory, `qdt_points_size()` returns `0`.
+  For a batch call that was given points, an empty context means the call was
+  rejected or failed; the two cases are not told apart, because both end in the
+  same empty context. If you need to tell them apart, check the input before
+  the call (finite coordinates, at most 100,000,000 points). A constraint call
+  that returns `0` with `qdt_points_size() > 0` was rejected and left the
+  triangulation as it was.
+- The fallback of `qdt_execute_parallel` to the serial algorithm (exhausted
+  edge storage, threads that cannot be started) is not an error: the call
+  still returns the complete result.
 
 ### Thread safety
 
@@ -674,7 +704,9 @@ qdt_verify --readme README.md --note "libqdt <commit>, MSVC /O2, static library"
   implementation, only inputs of at least 524,288 distinct points get a speedup
   and at most eight subproblems run concurrently (see [Parallel
   mode](#parallel-mode)). The thread count cannot be configured.
-- Errors are reported as C++ exceptions, not return codes (see
+- There are no error codes. A function that runs out of memory empties the
+  context and shows this only through its return value (`NULL` or `0`) and the
+  empty context; a rejected batch call looks the same (see
   [Error handling](#error-handling)).
 - Inputs must contain only finite coordinates, and a context must not be shared
   between threads without external synchronization.

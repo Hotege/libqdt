@@ -14,6 +14,8 @@ int main(void)
         {0.25, 0.75}
     };
     size_t n = sizeof(pts) / sizeof(pts[0]);
+    qdt_status st;
+    size_t index;
 
     qdt_t* q = qdt_create();
     if (!q)
@@ -22,14 +24,36 @@ int main(void)
     }
 
     /* Batch-triangulate most of the points. */
-    qdt_execute(q, pts, n - 2);
+    st = qdt_execute(q, pts, n - 2);
+    if (st != QDT_OK)
+    {
+        fprintf(stderr, "qdt_execute: %s\n", qdt_status_string(st));
+        qdt_destroy(q);
+        return 1;
+    }
 
-    /* Insert the remaining points incrementally. */
-    qdt_insert_point(q, pts[n - 2]);
-    qdt_insert_point(q, pts[n - 1]);
+    /* Insert the remaining points incrementally. The last argument receives
+       the index of the new point; it may be NULL if it is not needed. */
+    st = qdt_insert_point(q, pts[n - 2], &index);
+    if (st != QDT_OK)
+    {
+        fprintf(stderr, "qdt_insert_point: %s\n", qdt_status_string(st));
+        qdt_destroy(q);
+        return 1;
+    }
+    printf("Point %zu inserted\n", index);
+
+    st = qdt_insert_point(q, pts[n - 1], &index);
+    if (st != QDT_OK)
+    {
+        fprintf(stderr, "qdt_insert_point: %s\n", qdt_status_string(st));
+        qdt_destroy(q);
+        return 1;
+    }
+    printf("Point %zu inserted\n", index);
 
     /* Use qdt_execute_parallel(q, pts, n) for a full parallel batch. */
-    /* Use qdt_insert_point_parallel(q, pt) for parallel insertion. */
+    /* Use qdt_insert_point_parallel(q, pt, &index) for parallel insertion. */
 
     size_t triangle_count = qdt_triangles_size(q);
     printf("Triangles: %zu\n", triangle_count);

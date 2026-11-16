@@ -1004,11 +1004,12 @@ static void bench_insert(const Config& c)
                 for (size_t i = 0; i < extra.size(); ++i)
                 {
                     const double a = now_ms();
-                    const size_t ret = par ? qdt_insert_point_parallel(q, extra[i]) : qdt_insert_point(q, extra[i]);
+                    size_t           idx = 0;
+                    const qdt_status st = par ? qdt_insert_point_parallel(q, extra[i], &idx) : qdt_insert_point(q, extra[i], &idx);
                     const double b = now_ms();
-                    if (ret != n + i + 1)
+                    if (st != QDT_OK || idx != n + i)
                     {
-                        warn(fmt("insert, base %zu: insertion %zu returned %zu, expected %zu", n, i, ret, n + i + 1));
+                        warn(fmt("insert, base %zu: insertion %zu returned \"%s\" with index %zu, expected index %zu", n, i, qdt_status_string(st), idx, n + i));
                     }
                     if (i == 0)
                     {
@@ -1291,21 +1292,28 @@ static ConsResult run_constraints(qdt_t* q, const PointList& pts, const std::vec
     ConsResult r;
     r.tris_before = qdt_triangles_size(q);
 
+    std::vector<qdt_status> res(batch ? es.size() - 1 : 0); /* allocated outside the timed part */
+
     const double t0 = now_ms();
-    size_t       acc = qdt_insert_constraint(q, es[0].v0, es[0].v1);
+    size_t       acc = qdt_insert_constraint(q, es[0].v0, es[0].v1) == QDT_OK ? 1 : 0;
     const double t1 = now_ms();
     if (batch)
     {
-        acc += qdt_insert_constraints_batch(q, &es[1], es.size() - 1);
+        qdt_insert_constraints_batch(q, &es[1], es.size() - 1, res.data());
     }
     else
     {
         for (size_t i = 1; i < es.size(); ++i)
         {
-            acc += qdt_insert_constraint(q, es[i].v0, es[i].v1);
+            acc += qdt_insert_constraint(q, es[i].v0, es[i].v1) == QDT_OK ? 1 : 0;
         }
     }
     const double t2 = now_ms();
+
+    for (size_t i = 0; i < res.size(); ++i)
+    {
+        acc += res[i] == QDT_OK ? 1 : 0;
+    }
 
     r.first_ms = t1 - t0;
     r.rest_ms = t2 - t1;
@@ -1913,11 +1921,11 @@ static void mem_child(const PointList& pts, bool parallel, int wfd)
     const qdt_vec2d extra = P(kExtent * 0.5123, kExtent * 0.4877);
     if (parallel)
     {
-        qdt_insert_point_parallel(q, extra);
+        qdt_insert_point_parallel(q, extra, NULL);
     }
     else
     {
-        qdt_insert_point(q, extra);
+        qdt_insert_point(q, extra, NULL);
     }
     ok = ok && read_kb("VmHWM", &hwm2);
     trim_heap();
@@ -2048,11 +2056,11 @@ static int mem_child_main(int argc, char** argv)
     const qdt_vec2d extra = P(kExtent * 0.5123, kExtent * 0.4877);
     if (par)
     {
-        qdt_insert_point_parallel(q, extra);
+        qdt_insert_point_parallel(q, extra, NULL);
     }
     else
     {
-        qdt_insert_point(q, extra);
+        qdt_insert_point(q, extra, NULL);
     }
     ok = ok && win_commit(&c2, &p2);
     qdt_destroy(q);

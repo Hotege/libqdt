@@ -765,6 +765,35 @@ namespace wrapper
         mesh_built_ = true;
     }
 
+    namespace
+    {
+        // Joins every thread of a vector when it goes out of scope.
+        //
+        // Starting a thread allocates, so emplace_back() on the workers can
+        // throw after some of them are already running. Destroying a joinable
+        // std::thread calls std::terminate(), so without this guard such an
+        // exception would end the process instead of reaching the catch
+        // handler at the C API boundary. Declare it right after the vector, and
+        // declare everything the threads refer to by reference before it: it is
+        // then destroyed first during stack unwinding, so the threads have
+        // finished before those objects are destroyed.
+        class ThreadJoiner
+        {
+        public:
+            explicit ThreadJoiner(std::vector<std::thread>& threads) : threads_(threads) {}
+            ~ThreadJoiner()
+            {
+                for (auto& t : threads_)
+                    if (t.joinable()) t.join();
+            }
+            ThreadJoiner(const ThreadJoiner&) = delete;
+            ThreadJoiner& operator=(const ThreadJoiner&) = delete;
+
+        private:
+            std::vector<std::thread>& threads_;
+        };
+    }
+
     void Triangulation::ensure_mesh_parallel_()
     {
         if (mesh_built_) return;
@@ -823,6 +852,7 @@ namespace wrapper
         {
             std::vector<std::thread> workers;
             workers.reserve(nthreads);
+            ThreadJoiner joiner(workers);
 
             auto fill = [&](size_t t0, size_t t1) {
                 MeshHalfEdge* hp = mesh_halfedges_.data();
@@ -889,6 +919,7 @@ namespace wrapper
         {
             std::vector<std::thread> workers;
             workers.reserve(nthreads);
+            ThreadJoiner joiner(workers);
 
             auto find_twins = [&](size_t i0, size_t i1) {
                 MeshHalfEdge* hp = mesh_halfedges_.data();
@@ -1574,10 +1605,13 @@ namespace wrapper
     // crosses. Each is returned as the halfedge that runs from the vertex on
     // the right of u->v to the vertex on its left. Nothing is modified.
     //
-    // Returns false (and the list is meaningless) when the segment cannot
-    // become an edge as it is: it crosses a constrained edge, or it passes
-    // exactly through another vertex.
-    bool Triangulation::trace_segment_(int u, int v, std::vector<int>& crossed) const
+    // Returns QDT_OK, or (and the list is meaningless) the reason why the
+    // segment cannot become an edge as it is: QDT_ERR_CROSSES_CONSTRAINT, or
+    // QDT_ERR_THROUGH_POINT when it passes exactly through another vertex.
+    // QDT_ERR_INTERNAL is returned for situations that cannot occur when both
+    // end points are vertices of the triangulation (the walk leaves the convex
+    // hull, or does not end).
+    qdt_status Triangulation::trace_segment_(int u, int v, std::vector<int>& crossed) const
     {
         auto he_next = [&](int h) { return mesh_halfedges_[h].next; };
         auto org = [&](int h) { return mesh_halfedges_[h].origin; };
@@ -1610,28 +1644,29 @@ namespace wrapper
             }
             return false;
             });
-        if (blocked || start < 0) return false;
+        if (blocked) return QDT_ERR_THROUGH_POINT;
+        if (start < 0) return QDT_ERR_INTERNAL; // v is a vertex, so some triangle must contain the direction
 
         // In the first triangle y lies on the right of u->v and z on its left.
         // Every crossed edge keeps that orientation (right vertex -> left vertex).
         int c = start;
         for (size_t guard = 0; guard <= triangles.size(); ++guard)
         {
-            if (mesh_halfedges_[c].is_constrained) return false;
+            if (mesh_halfedges_[c].is_constrained) return QDT_ERR_CROSSES_CONSTRAINT;
             crossed.push_back(c);
 
             const int tw = mesh_halfedges_[c].twin; // z -> y in the next triangle
-            if (tw < 0) return false;               // would leave the convex hull
+            if (tw < 0) return QDT_ERR_INTERNAL;    // would leave the convex hull
             const int a = he_next(tw);              // y -> w
             const int b = he_next(a);               // w -> z
             const int w = org(b);
-            if (w == v) return true;
+            if (w == v) return QDT_OK;
 
             const double o = robust::orient2d(U, V, pt(w));
-            if (o == 0) return false;               // w lies on the segment
+            if (o == 0) return QDT_ERR_THROUGH_POINT; // w lies on the segment
             c = (o > 0) ? a : b;                    // w on the left: leave via y->w
         }
-        return false;
+        return QDT_ERR_INTERNAL;
     }
 
     // Lawson's flip algorithm: every edge on the stack that is not
@@ -1678,19 +1713,24 @@ namespace wrapper
     //    which always ends with the edge u-v in place, and then the
     //    constrained Delaunay property is restored with Lawson flips.
     //  - If the segment crosses a constrained edge or passes through another
-    //    vertex it cannot be an edge: nothing is changed and false is returned.
-    bool Triangulation::insert_constraint_local_(int u, int v)
+    //    vertex it cannot be an edge: nothing is changed and the reason
+    //    (QDT_ERR_CROSSES_CONSTRAINT or QDT_ERR_THROUGH_POINT) is returned.
+    //  - QDT_ERR_INTERNAL means the flipping did not end with the edge in
+    //    place. That cannot happen with exact predicates; the triangulation may
+    //    have been changed, so the caller resets the context.
+    qdt_status Triangulation::insert_constraint_local_(int u, int v)
     {
         int e = find_halfedge_(u, v);
         if (e < 0) e = find_halfedge_(v, u);
         if (e >= 0)
         {
             mark_constrained_(e);
-            return true;
+            return QDT_OK;
         }
 
         std::vector<int> crossed;
-        if (!trace_segment_(u, v, crossed)) return false;
+        const qdt_status traced = trace_segment_(u, v, crossed);
+        if (traced != QDT_OK) return traced;
 
         const qdt_vec2d& U = mesh_vertices_[u].p;
         const qdt_vec2d& V = mesh_vertices_[v].p;
@@ -1764,46 +1804,48 @@ namespace wrapper
         for (int h : new_edges) push_around(h);
         for (int h : queue) push_around(h);
         legalize_(stack);
-        return ok;
+        return ok ? QDT_OK : QDT_ERR_INTERNAL;
     }
 
-    bool Triangulation::insert_constraint(size_t orig_v0, size_t orig_v1)
+    qdt_status Triangulation::insert_constraint(size_t orig_v0, size_t orig_v1)
     {
         // Indices come from the caller: reject anything that is not a point of
         // this context (this also covers a context that was never filled).
-        if (orig_v0 >= rep.size() || orig_v1 >= rep.size()) return false;
+        if (orig_v0 >= rep.size() || orig_v1 >= rep.size()) return QDT_ERR_INVALID_INDEX;
         orig_v0 = rep[orig_v0];
         orig_v1 = rep[orig_v1];
-        if (orig_v0 == orig_v1) return false;
+        if (orig_v0 == orig_v1) return QDT_ERR_SAME_POINT;
 
         ensure_mesh_();
         const int u = orig_to_local_vtx_(orig_v0);
         const int v = orig_to_local_vtx_(orig_v1);
-        if (u < 0 || v < 0) return false;
+        // Every distinct point is a vertex of the mesh as soon as there are
+        // triangles, so a missing vertex means there are none.
+        if (u < 0 || v < 0) return QDT_ERR_NO_TRIANGLES;
         return insert_constraint_local_(u, v);
     }
 
-    size_t Triangulation::insert_constraints_batch(const qdt_edge* edges, size_t num_edges)
+    qdt_status Triangulation::insert_constraints_batch(const qdt_edge* edges, size_t num_edges, qdt_status* results)
     {
-        if (!edges || num_edges == 0) return 0;
-        ensure_mesh_();
-
-        size_t count = 0;
+        qdt_status first_error = QDT_OK;
         for (size_t i = 0; i < num_edges; ++i)
         {
-            size_t a = edges[i].v0;
-            size_t b = edges[i].v1;
-            if (a >= rep.size() || b >= rep.size()) continue;
-            a = rep[a];
-            b = rep[b];
-            if (a == b) continue;
-            const int u = orig_to_local_vtx_(a);
-            const int v = orig_to_local_vtx_(b);
-            if (u < 0 || v < 0) continue;
-            if (insert_constraint_local_(u, v))
-                ++count;
+            const qdt_status st = insert_constraint(edges[i].v0, edges[i].v1);
+            if (st == QDT_ERR_INTERNAL)
+            {
+                // The context is no longer trustworthy: stop, and let the
+                // caller reset it. No entry counts as accepted.
+                if (results)
+                {
+                    for (size_t k = 0; k < num_edges; ++k)
+                        results[k] = QDT_ERR_INTERNAL;
+                }
+                return QDT_ERR_INTERNAL;
+            }
+            if (results) results[i] = st;
+            if (st != QDT_OK && first_error == QDT_OK) first_error = st;
         }
-        return count;
+        return first_error;
     }
 
     Triangulation delaunay_triangulate(const Point* pts, size_t sz)
